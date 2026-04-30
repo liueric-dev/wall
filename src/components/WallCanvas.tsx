@@ -6,7 +6,7 @@ import {
 } from '../lib/viewport'
 import type { Viewport } from '../lib/viewport'
 import { DRAW_RADIUS } from '../lib/location'
-import { captureLocationForSession, clearLockedLocation } from '../lib/geolocation'
+import { captureLocationForSession, clearLockedLocation, getPermissionState } from '../lib/geolocation'
 import type { PixelEvent } from '../lib/events'
 import { getOrCreateSessionId, generateId } from '../lib/session'
 import { getPixel, setPixel, deletePixel } from '../lib/pixelStore'
@@ -117,6 +117,10 @@ export default function WallCanvas() {
     loadViewportPixels(bounds).then(pixels => {
       pixels.forEach(p => setPixel(p.x, p.y, p.colorIdx))
       if (pixels.length > 0) setPixelVersion(v => v + 1)
+    })
+    // Hide Doodle button immediately if location is already denied
+    getPermissionState().then(state => {
+      if (state === 'denied') setLocationStatus('denied')
     })
   }, [])
 

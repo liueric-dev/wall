@@ -41,10 +41,13 @@ export default function WelcomeScreen({ onComplete }: { onComplete: () => void }
     ctx.fillStyle = PALETTE[selectedColor]
     ctx.fillRect(px * PIXEL_SIZE, py * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE)
 
+    // GPS must be kicked off synchronously within the user gesture — any await before
+    // this call breaks iOS Safari's gesture-context requirement
+    const locPromise = captureLocationForSession()
+
     await delay(500)
 
-    // Request location
-    const loc = await captureLocationForSession()
+    const loc = await locPromise
 
     if (loc) {
       const world = latLngToWorld(loc.lat, loc.lng)

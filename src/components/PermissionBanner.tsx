@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { getPermissionState } from '../lib/geolocation'
 
 export default function PermissionBanner() {
-  const [permission, setPermission] = useState<PermissionState>('prompt')
+  const [permission, setPermission] = useState<PermissionState | null>(null)
   const [dismissed, setDismissed] = useState(false)
 
   useEffect(() => {
@@ -12,6 +12,8 @@ export default function PermissionBanner() {
     }
   }, [])
 
+  // Don't render until we know the actual permission state
+  if (permission === null) return null
   if (permission === 'granted') return null
   if (dismissed) return null
 
