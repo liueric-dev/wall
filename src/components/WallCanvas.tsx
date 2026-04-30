@@ -1,27 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { screenToWorld, WORLD_HEIGHT } from '../lib/coordinates'
+import { screenToWorld, TILE_SIZE, latLngToWorld } from '../lib/coordinates'
 import {
   initialViewport, viewportCenteredOn, animateViewportTo,
   zoomAt, pan as panViewport, clampViewport,
 } from '../lib/viewport'
 import type { Viewport } from '../lib/viewport'
-import { getMockedLocation, getMockedLocationWorld, DRAW_RADIUS } from '../lib/location'
-import { loadEvents, saveEvents, appendEvent } from '../lib/events'
+import { DRAW_RADIUS } from '../lib/location'
+import { captureLocationForSession, clearLockedLocation } from '../lib/geolocation'
 import type { PixelEvent } from '../lib/events'
 import { getOrCreateSessionId, generateId } from '../lib/session'
-import { getPixel, setPixel, deletePixel, replayEvents, getAllUserPixels } from '../lib/pixelStore'
+import { getPixel, setPixel, deletePixel } from '../lib/pixelStore'
 import { getRawPixelColor } from '../lib/tileRenderer'
 import { PALETTE } from '../data/testDoodles'
+import { loadBudgetState, saveBudgetState, getCurrentBudget, deductBudget } from '../lib/budget'
+import { getCurrentPrompt } from '../lib/prompts'
+import { TUNING } from '../config/tuning'
+import {
+  insertPixelEvent, loadViewportPixels, deletePixelEvents, upsertTile,
+} from '../lib/pixelApi'
+import type { Bounds } from '../lib/pixelApi'
+import { startPolling } from '../lib/polling'
 import BaseMapLayer from './BaseMapLayer'
 import PixelLayer from './PixelLayer'
 import RadiusOverlay from './RadiusOverlay'
 import DrawingToolbar from './DrawingToolbar'
 
-// ── constants ────────────────────────────────────────────────────────────────
-const DRAW_SCALE = 10        // viewport scale when entering draw mode
-const DRAG_THRESHOLD = 3     // screen pixels before a tap becomes a drag
-
-type UndoEntry = { type: 'single'; id: string } | { type: 'group'; groupId: string }
+const DRAW_SCALE = TUNING.viewport.drawScale
+const DRAG_THRESHOLD = TUNING.cooldown.dragThresholdPx
 
 // ── Bresenham line ─────────────────────────────────────────────────────────
 function* linePixels(x0: number, y0: number, x1: number, y1: number): Generator<[number, number]> {
@@ -50,6 +55,18 @@ function toWorldPixel(sx: number, sy: number, vp: Viewport): { x: number; y: num
   return { x: Math.floor(w.x), y: Math.floor(w.y) }
 }
 
+// ── viewport → world bounds for Supabase queries ─────────────────────────
+function getViewportBounds(vp: Viewport, size: { w: number; h: number }): Bounds {
+  const tl = screenToWorld(0, 0, vp)
+  const br = screenToWorld(size.w, size.h, vp)
+  return {
+    minX: Math.max(0, Math.floor(Math.min(tl.x, br.x))),
+    maxX: Math.ceil(Math.max(tl.x, br.x)),
+    minY: Math.max(0, Math.floor(Math.min(tl.y, br.y))),
+    maxY: Math.ceil(Math.max(tl.y, br.y)),
+  }
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 
 export default function WallCanvas() {
@@ -66,9 +83,16 @@ export default function WallCanvas() {
   const [mode, setMode] = useState<'browse' | 'draw' | 'animating'>('browse')
   const [selectedColor, setSelectedColor] = useState(0)
   const [pixelVersion, setPixelVersion] = useState(0)
-  const [canUndo, setCanUndo] = useState(false)
+  const [syncError, setSyncError] = useState(false)
 
-  const undoStack = useRef<UndoEntry[]>([])
+  // GPS state — null until captured when entering draw mode
+  const [locationWorld, setLocationWorld] = useState<{ x: number; y: number } | null>(null)
+  const locationWorldRef = useRef(locationWorld)
+  locationWorldRef.current = locationWorld
+
+  // 'idle' | 'requesting' | 'denied'
+  const [locationStatus, setLocationStatus] = useState<'idle' | 'requesting' | 'denied'>('idle')
+
   const animCancel = useRef<(() => void) | null>(null)
   const browseViewport = useRef<Viewport | null>(null)
 
@@ -82,15 +106,37 @@ export default function WallCanvas() {
   const drawGroupSeq = useRef(0)
   const lastDrawPixel = useRef<{ x: number; y: number } | null>(null)
 
-  const location = getMockedLocation()
-  const locationWorld = getMockedLocationWorld()
+  // cooldown refs
+  const lastTapMs = useRef(0)
+  const lastDragPixelMs = useRef(0)
 
-  // ── bootstrap: replay persisted events on mount ──────────────────────────
+  // ── bootstrap: load pixels from Supabase on mount ────────────────────────
   useEffect(() => {
-    const events = loadEvents()
-    replayEvents(events)
-    if (events.length > 0) setPixelVersion(v => v + 1)
+    localStorage.removeItem('wall_events')  // throw away legacy localStorage pixels
+    const bounds = getViewportBounds(viewportRef.current, sizeRef.current)
+    loadViewportPixels(bounds).then(pixels => {
+      pixels.forEach(p => setPixel(p.x, p.y, p.colorIdx))
+      if (pixels.length > 0) setPixelVersion(v => v + 1)
+    })
   }, [])
+
+  // ── polling: new pixels from other users every 5s ────────────────────────
+  useEffect(() => {
+    return startPolling(
+      () => getViewportBounds(viewportRef.current, sizeRef.current),
+      (pixels) => {
+        pixels.forEach(p => setPixel(p.x, p.y, p.colorIdx))
+        setPixelVersion(v => v + 1)
+      },
+    )
+  }, [])
+
+  // ── auto-clear sync error after 3s ───────────────────────────────────────
+  useEffect(() => {
+    if (!syncError) return
+    const id = setTimeout(() => setSyncError(false), 3000)
+    return () => clearTimeout(id)
+  }, [syncError])
 
   // ── resize ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -110,13 +156,18 @@ export default function WallCanvas() {
     groupId: string | null,
     seq: number | null,
   ): boolean => {
+    const loc = locationWorldRef.current
+    if (!loc) return false
     // bounds check
     if (wx < 0 || wy < 0) return false
     // radius check
-    const dx = wx - locationWorld.x, dy = wy - locationWorld.y
+    const dx = wx - loc.x, dy = wy - loc.y
     if (Math.hypot(dx, dy) > DRAW_RADIUS) return false
     // no-op check
     if (getEffectiveColor(wx, wy) === selectedColor) return false
+    // budget check
+    const budgetState = loadBudgetState()
+    if (getCurrentBudget(budgetState) < 1) return false
 
     const color = PALETTE[selectedColor]
     const sessionId = getOrCreateSessionId()
@@ -135,55 +186,75 @@ export default function WallCanvas() {
       layer: 0,
     }
 
-    appendEvent(event)
+    // Optimistic update
+    const prevColorIdx = getPixel(wx, wy)
     setPixel(wx, wy, selectedColor)
+    saveBudgetState(deductBudget(budgetState, 1))
     setPixelVersion(v => v + 1)
+
+    // Async write to Supabase
+    insertPixelEvent(event, selectedColor).then(({ eventId, error }) => {
+      if (error) {
+        // Revert local state
+        if (prevColorIdx === undefined) deletePixel(wx, wy)
+        else setPixel(wx, wy, prevColorIdx)
+        setPixelVersion(v => v + 1)
+        setSyncError(true)
+      } else if (eventId !== null) {
+        setSyncError(false)
+        // Update tile cache (fire and forget)
+        const tileX = Math.floor(wx / TILE_SIZE)
+        const tileY = Math.floor(wy / TILE_SIZE)
+        const localX = wx - tileX * TILE_SIZE
+        const localY = wy - tileY * TILE_SIZE
+        upsertTile(tileX, tileY, localX, localY, selectedColor, eventId)
+      }
+    })
+
     return true
-  }, [selectedColor, locationWorld])
-
-  // ── undo ──────────────────────────────────────────────────────────────────
-  const undo = useCallback(() => {
-    const entry = undoStack.current.pop()
-    if (!entry) return
-
-    const events = loadEvents()
-    const remaining = entry.type === 'single'
-      ? events.filter(e => e.id !== entry.id)
-      : events.filter(e => e.group_id !== entry.groupId)
-
-    saveEvents(remaining)
-    replayEvents(remaining)
-    setPixelVersion(v => v + 1)
-    setCanUndo(undoStack.current.length > 0)
-  }, [])
+  }, [selectedColor, setSyncError])
 
   // ── enter / exit draw mode ────────────────────────────────────────────────
-  const enterDraw = useCallback(() => {
+  const enterDraw = useCallback(async () => {
     if (mode !== 'browse') return
+    setLocationStatus('requesting')
+
+    const loc = await captureLocationForSession()
+    if (!loc) {
+      setLocationStatus('denied')
+      return
+    }
+
+    const world = latLngToWorld(loc.lat, loc.lng)
+    setLocationWorld(world)
+    locationWorldRef.current = world
+    setLocationStatus('idle')
+
     browseViewport.current = viewportRef.current
     const target = viewportCenteredOn(
-      locationWorld.x, locationWorld.y,
+      world.x, world.y,
       DRAW_SCALE,
-      size.w, size.h,
+      sizeRef.current.w, sizeRef.current.h,
     )
     setMode('animating')
     animCancel.current = animateViewportTo(
-      viewportRef.current, target, 500,
+      viewportRef.current, target, TUNING.viewport.animDurationMs,
       vp => setViewport(vp),
       () => setMode('draw'),
     )
-  }, [mode, locationWorld, size])
+  }, [mode])
 
   const exitDraw = useCallback(() => {
     if (mode !== 'draw') return
-    const target = browseViewport.current ?? initialViewport(size.w, size.h)
+    clearLockedLocation()
+    const target = browseViewport.current ?? initialViewport(sizeRef.current.w, sizeRef.current.h)
     setMode('animating')
     animCancel.current = animateViewportTo(
-      viewportRef.current, target, 500,
+      viewportRef.current, target, TUNING.viewport.animDurationMs,
       vp => setViewport(vp),
       () => setMode('browse'),
     )
-  }, [mode, size])
+  }, [mode])
 
   // ── pointer handlers ──────────────────────────────────────────────────────
   const onPointerDown = useCallback((e: React.PointerEvent) => {
@@ -235,16 +306,21 @@ export default function WallCanvas() {
         const vp = viewportRef.current
         const curr = toWorldPixel(e.clientX, e.clientY, vp)
 
+        const dragIntervalMs = 1000 / TUNING.cooldown.dragMaxPixelsPerSecond
         if (lastDrawPixel.current) {
           const { x: x0, y: y0 } = lastDrawPixel.current
           let placedAny = false
           for (const [wx, wy] of linePixels(x0, y0, curr.x, curr.y)) {
+            if (Date.now() - lastDragPixelMs.current < dragIntervalMs) continue
             const placed = placePixel(wx, wy, drawGroupId.current, ++drawGroupSeq.current)
-            if (placed) placedAny = true
+            if (placed) { placedAny = true; lastDragPixelMs.current = Date.now() }
           }
-          if (!placedAny) drawGroupSeq.current-- // don't advance seq for no-ops
+          if (!placedAny) drawGroupSeq.current--
         } else {
-          placePixel(curr.x, curr.y, drawGroupId.current, ++drawGroupSeq.current)
+          if (Date.now() - lastDragPixelMs.current >= dragIntervalMs) {
+            const placed = placePixel(curr.x, curr.y, drawGroupId.current, ++drawGroupSeq.current)
+            if (placed) lastDragPixelMs.current = Date.now()
+          }
         }
         lastDrawPixel.current = curr
       }
@@ -261,29 +337,25 @@ export default function WallCanvas() {
       drawActive.current = false
 
       if (!hasDragged.current) {
-        const start = drawStartScreen.current!
-        const { x: wx, y: wy } = toWorldPixel(start.x, start.y, viewportRef.current)
-
-        if (getPixel(wx, wy) !== undefined) {
-          // Tap on a user-placed pixel — erase it back to background
-          deletePixel(wx, wy)
-          const remaining = loadEvents().filter(e => !(e.x === wx && e.y === wy))
-          saveEvents(remaining)
-          setPixelVersion(v => v + 1)
+        // tap cooldown
+        if (Date.now() - lastTapMs.current < TUNING.cooldown.betweenPixelsMs) {
+          // silently skip
         } else {
-          // Tap on empty/background — place pixel
-          const placed = placePixel(wx, wy, null, null)
-          if (placed) {
-            const events = loadEvents()
-            const lastEvent = events[events.length - 1]
-            undoStack.current.push({ type: 'single', id: lastEvent.id })
-            setCanUndo(true)
+          const start = drawStartScreen.current!
+          const { x: wx, y: wy } = toWorldPixel(start.x, start.y, viewportRef.current)
+
+          if (getPixel(wx, wy) !== undefined) {
+            // Tap on a user-placed pixel — erase it back to background
+            deletePixel(wx, wy)
+            setPixelVersion(v => v + 1)
+            lastTapMs.current = Date.now()
+            deletePixelEvents(wx, wy)  // async, fire and forget
+          } else {
+            // Tap on empty/background — place pixel
+            const placed = placePixel(wx, wy, null, null)
+            if (placed) lastTapMs.current = Date.now()
           }
         }
-      } else if (drawGroupSeq.current > 0) {
-        // Drag — record the whole group for undo
-        undoStack.current.push({ type: 'group', groupId: drawGroupId.current! })
-        setCanUndo(true)
       }
 
       drawGroupId.current = null
@@ -298,13 +370,6 @@ export default function WallCanvas() {
     setViewport(vp => clampViewport(zoomAt(vp, e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 1 / 1.1), sizeRef.current.w, sizeRef.current.h))
   }, [mode])
 
-  // ── count today's pixels for the budget display ───────────────────────────
-  const todayStr = new Date().toISOString().slice(0, 10)
-  const sessionId = getOrCreateSessionId()
-  const todayPixelCount = loadEvents().filter(
-    e => e.session_id === sessionId && e.placed_at.startsWith(todayStr)
-  ).length
-
   return (
     <div
       ref={containerRef}
@@ -318,7 +383,7 @@ export default function WallCanvas() {
       <BaseMapLayer viewport={viewport} width={size.w} height={size.h} />
       <PixelLayer viewport={viewport} width={size.w} height={size.h} pixelVersion={pixelVersion} />
 
-      {mode === 'draw' && (
+      {mode === 'draw' && locationWorld && (
         <RadiusOverlay
           locationWorld={locationWorld}
           viewport={viewport}
@@ -327,7 +392,7 @@ export default function WallCanvas() {
         />
       )}
 
-      {/* Browse mode — Doodle entry button */}
+      {/* Browse mode — Doodle entry button or read-only indicator */}
       {mode === 'browse' && (
         <div style={{
           position: 'absolute',
@@ -335,26 +400,57 @@ export default function WallCanvas() {
           left: '50%',
           transform: 'translateX(-50%)',
           pointerEvents: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 8,
         }}>
-          <button
-            onClick={enterDraw}
-            style={{
-              height: 48,
-              padding: '0 28px',
-              background: '#1a1a1a',
-              color: '#faf7f2',
-              border: 'none',
-              borderRadius: 24,
-              cursor: 'pointer',
-              fontSize: 15,
+          {locationStatus === 'denied' ? (
+            <span style={{
+              fontSize: 13,
               fontFamily: 'ui-monospace, monospace',
-              letterSpacing: '0.06em',
-              boxShadow: '0 2px 12px rgba(0,0,0,0.18)',
-            }}
-          >
-            Doodle
-          </button>
+              color: '#888',
+              letterSpacing: '0.04em',
+            }}>
+              Enable location to draw
+            </span>
+          ) : (
+            <button
+              onClick={enterDraw}
+              disabled={locationStatus === 'requesting'}
+              style={{
+                height: 48,
+                padding: '0 28px',
+                background: locationStatus === 'requesting' ? '#888' : '#1a1a1a',
+                color: '#faf7f2',
+                border: 'none',
+                borderRadius: 24,
+                cursor: locationStatus === 'requesting' ? 'default' : 'pointer',
+                fontSize: 15,
+                fontFamily: 'ui-monospace, monospace',
+                letterSpacing: '0.06em',
+                boxShadow: '0 2px 12px rgba(0,0,0,0.18)',
+              }}
+            >
+              {locationStatus === 'requesting' ? 'Locating…' : 'Doodle'}
+            </button>
+          )}
         </div>
+      )}
+
+      {/* Sync error indicator */}
+      {syncError && (
+        <div style={{
+          position: 'absolute',
+          bottom: 16,
+          right: 16,
+          width: 8,
+          height: 8,
+          borderRadius: '50%',
+          background: '#c0392b',
+          pointerEvents: 'none',
+          opacity: 0.8,
+        }} />
       )}
 
       {/* Draw mode toolbar */}
@@ -362,11 +458,8 @@ export default function WallCanvas() {
         <DrawingToolbar
           selectedColor={selectedColor}
           onColorSelect={setSelectedColor}
-          onUndo={undo}
           onDone={exitDraw}
-          canUndo={canUndo}
-          pixelCount={todayPixelCount}
-          locationName={location.name}
+          prompt={getCurrentPrompt()}
         />
       )}
     </div>

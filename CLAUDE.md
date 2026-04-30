@@ -1,0 +1,1 @@
+Read ARCHITECTURE.md, PRODUCT.md, and MANIFESTO.md in the root directory.

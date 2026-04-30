@@ -1,4 +1,4 @@
-import { latLngToWorld } from './coordinates'
+import { TUNING } from '../config/tuning'
 
 export interface Location {
   name: string
@@ -14,16 +14,7 @@ export const LOCATIONS: Record<string, Location> = {
   bushwick:     { name: 'Bushwick',         lat: 40.6944, lng: -73.9213 },
   eastvillage:  { name: 'East Village',     lat: 40.7265, lng: -73.9815 },
   midtown:      { name: 'Midtown',          lat: 40.7549, lng: -73.9840 },
+  upperwestside: { name: 'Upper West Side', lat: 40.7870, lng: -73.9754 },
 }
 
-export const DRAW_RADIUS = 30 // world pixels (~300ft)
-
-export function getMockedLocation(): Location {
-  const key = new URLSearchParams(window.location.search).get('location')?.toLowerCase()
-  return (key && LOCATIONS[key]) ? LOCATIONS[key] : LOCATIONS.lic
-}
-
-export function getMockedLocationWorld() {
-  const loc = getMockedLocation()
-  return latLngToWorld(loc.lat, loc.lng)
-}
+export const DRAW_RADIUS = TUNING.radius.pixels

@@ -1,10 +1,11 @@
 import { WORLD_WIDTH, WORLD_HEIGHT } from './coordinates'
 import type { Viewport } from './coordinates'
+import { TUNING } from '../config/tuning'
 
 export type { Viewport }
 
-export const MIN_SCALE = 0.012   // fallback; clampViewport uses a dynamic floor
-export const MAX_SCALE = 40      // individual pixels are clearly visible squares
+export const MIN_SCALE = TUNING.viewport.minScale
+export const MAX_SCALE = TUNING.viewport.maxScale
 
 export function initialViewport(screenW: number, screenH: number): Viewport {
   const scale = Math.min(screenW / WORLD_WIDTH, screenH / WORLD_HEIGHT) * 0.9
