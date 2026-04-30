@@ -6,7 +6,7 @@ import {
 } from '../lib/viewport'
 import type { Viewport } from '../lib/viewport'
 import { DRAW_RADIUS } from '../lib/location'
-import { captureLocationForSession, clearLockedLocation, getPermissionState } from '../lib/geolocation'
+import { captureLocationForSession, clearLockedLocation } from '../lib/geolocation'
 import type { PixelEvent } from '../lib/events'
 import { getOrCreateSessionId, generateId } from '../lib/session'
 import { getPixel, setPixel, deletePixel } from '../lib/pixelStore'
@@ -118,10 +118,6 @@ export default function WallCanvas() {
       pixels.forEach(p => setPixel(p.x, p.y, p.colorIdx))
       if (pixels.length > 0) setPixelVersion(v => v + 1)
     })
-    // Hide Doodle button immediately if location is already denied
-    getPermissionState().then(state => {
-      if (state === 'denied') setLocationStatus('denied')
-    })
   }, [])
 
   // ── polling: new pixels from other users every 5s ────────────────────────
@@ -223,13 +219,17 @@ export default function WallCanvas() {
     if (mode !== 'browse') return
     setLocationStatus('requesting')
 
-    const loc = await captureLocationForSession()
-    if (!loc) {
-      setLocationStatus('denied')
+    const result = await captureLocationForSession()
+    if (result === 'denied') {
+      setLocationStatus('denied')  // user explicitly denied — hide button
+      return
+    }
+    if (!result) {
+      setLocationStatus('idle')    // timeout or unavailable — keep button, let user retry
       return
     }
 
-    const world = latLngToWorld(loc.lat, loc.lng)
+    const world = latLngToWorld(result.lat, result.lng)
     setLocationWorld(world)
     locationWorldRef.current = world
     setLocationStatus('idle')

@@ -47,7 +47,8 @@ export default function WelcomeScreen({ onComplete }: { onComplete: () => void }
 
     await delay(500)
 
-    const loc = await locPromise
+    const locResult = await locPromise
+    const loc = locResult && locResult !== 'denied' ? locResult : null
 
     if (loc) {
       const world = latLngToWorld(loc.lat, loc.lng)

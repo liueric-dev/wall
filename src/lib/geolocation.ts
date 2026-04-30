@@ -13,7 +13,7 @@ export function setDevOverride(loc: { lat: number; lng: number } | null) {
   lockedLocation = null  // clear lock so next captureLocationForSession picks up the new override
 }
 
-export async function captureLocationForSession(): Promise<LocationState | null> {
+export async function captureLocationForSession(): Promise<LocationState | 'denied' | null> {
   if (lockedLocation) return lockedLocation
 
   if (devOverride) {
@@ -42,8 +42,9 @@ export async function captureLocationForSession(): Promise<LocationState | null>
         resolve(lockedLocation)
       },
       (error) => {
-        console.error('Geolocation failed:', error)
-        resolve(null)
+        console.error('Geolocation error code:', error.code, error.message)
+        // code 1 = PERMISSION_DENIED; codes 2/3 = unavailable or timeout (not permanent)
+        resolve(error.code === error.PERMISSION_DENIED ? 'denied' : null)
       },
       {
         enableHighAccuracy: true,
