@@ -7,6 +7,7 @@ import {
 import type { Viewport } from '../lib/viewport'
 import { DRAW_RADIUS } from '../lib/location'
 import { captureLocationForSession, clearLockedLocation } from '../lib/geolocation'
+import { usePermissionState } from '../lib/usePermissionState'
 import type { PixelEvent } from '../lib/events'
 import { getOrCreateSessionId, generateId } from '../lib/session'
 import { getPixel, setPixel, deletePixel } from '../lib/pixelStore'
@@ -90,8 +91,9 @@ export default function WallCanvas() {
   const locationWorldRef = useRef(locationWorld)
   locationWorldRef.current = locationWorld
 
-  // 'idle' | 'requesting' | 'denied'
-  const [locationStatus, setLocationStatus] = useState<'idle' | 'requesting' | 'denied'>('idle')
+  const permissionState = usePermissionState()
+  // 'idle' | 'requesting'
+  const [locationStatus, setLocationStatus] = useState<'idle' | 'requesting'>('idle')
 
   const animCancel = useRef<(() => void) | null>(null)
   const browseViewport = useRef<Viewport | null>(null)
@@ -220,12 +222,8 @@ export default function WallCanvas() {
     setLocationStatus('requesting')
 
     const result = await captureLocationForSession()
-    if (result === 'denied') {
-      setLocationStatus('denied')  // user explicitly denied — hide button
-      return
-    }
-    if (!result) {
-      setLocationStatus('idle')    // timeout or unavailable — keep button, let user retry
+    if (!result || result === 'denied') {
+      setLocationStatus('idle')  // hook will reactively hide button if truly denied
       return
     }
 
@@ -409,7 +407,7 @@ export default function WallCanvas() {
           alignItems: 'center',
           gap: 8,
         }}>
-          {locationStatus === 'denied' ? (
+          {permissionState === 'denied' ? (
             <span style={{
               fontSize: 13,
               fontFamily: 'ui-monospace, monospace',

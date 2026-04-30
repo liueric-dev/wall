@@ -1,33 +1,28 @@
-import { useEffect, useState } from 'react'
-import { getPermissionState } from '../lib/geolocation'
+import { useState } from 'react'
+import { usePermissionState } from '../lib/usePermissionState'
 
 export default function PermissionBanner() {
-  const [permission, setPermission] = useState<PermissionState | null>(null)
-  const [dismissed, setDismissed] = useState(false)
+  const permission = usePermissionState()
+  const [dismissed, setDismissed] = useState(
+    () => !!sessionStorage.getItem('permission_banner_dismissed')
+  )
 
-  useEffect(() => {
-    getPermissionState().then(setPermission)
-    if (sessionStorage.getItem('permission_banner_dismissed')) {
-      setDismissed(true)
-    }
-  }, [])
-
-  // Don't render until we know the actual permission state
+  // Don't render until we know the actual state
   if (permission === null) return null
   if (permission === 'granted') return null
   if (dismissed) return null
 
   function handleEnable() {
-    navigator.geolocation.getCurrentPosition(
-      () => getPermissionState().then(setPermission),
-      () => getPermissionState().then(setPermission),
-    )
+    // Triggers the browser prompt if state is 'prompt'; no-op if already denied
+    navigator.geolocation.getCurrentPosition(() => {}, () => {})
   }
 
   function handleDismiss() {
     setDismissed(true)
     sessionStorage.setItem('permission_banner_dismissed', 'true')
   }
+
+  const isDenied = permission === 'denied'
 
   return (
     <div style={{
@@ -46,27 +41,33 @@ export default function PermissionBanner() {
       fontSize: 13,
     }}>
       <div style={{ flex: 1 }}>
-        <div style={{ marginBottom: 2 }}>Enable location to add to The Wall</div>
+        <div style={{ marginBottom: 2 }}>
+          {isDenied ? 'Location blocked' : 'Enable location to add to The Wall'}
+        </div>
         <div style={{ color: '#aaa', fontSize: 11 }}>
-          You can browse anywhere — drawing requires being there.
+          {isDenied
+            ? 'Go to Settings → Safari → Location to allow.'
+            : 'You can browse anywhere — drawing requires being there.'}
         </div>
       </div>
-      <button
-        onClick={handleEnable}
-        style={{
-          background: '#faf7f2',
-          color: '#1a1a1a',
-          border: 'none',
-          borderRadius: 14,
-          padding: '6px 14px',
-          cursor: 'pointer',
-          fontSize: 12,
-          fontFamily: 'ui-monospace, monospace',
-          whiteSpace: 'nowrap',
-        }}
-      >
-        Enable
-      </button>
+      {!isDenied && (
+        <button
+          onClick={handleEnable}
+          style={{
+            background: '#faf7f2',
+            color: '#1a1a1a',
+            border: 'none',
+            borderRadius: 14,
+            padding: '6px 14px',
+            cursor: 'pointer',
+            fontSize: 12,
+            fontFamily: 'ui-monospace, monospace',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          Enable
+        </button>
+      )}
       <button
         onClick={handleDismiss}
         style={{
