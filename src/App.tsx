@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import WallCanvas from './components/WallCanvas'
 import WelcomeScreen from './components/WelcomeScreen'
-import PermissionBanner from './components/PermissionBanner'
 import DevLocationMenu from './components/DevLocationMenu'
 
 export default function App() {
@@ -16,7 +15,6 @@ export default function App() {
   return (
     <>
       <WallCanvas />
-      <PermissionBanner />
       {import.meta.env.DEV && <DevLocationMenu />}
     </>
   )

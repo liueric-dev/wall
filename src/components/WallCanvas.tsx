@@ -92,8 +92,18 @@ export default function WallCanvas() {
   locationWorldRef.current = locationWorld
 
   const permissionState = usePermissionState()
-  // 'idle' | 'requesting'
   const [locationStatus, setLocationStatus] = useState<'idle' | 'requesting'>('idle')
+  const [toastVisible, setToastVisible] = useState(false)
+  const toastTimerRef = useRef<number | null>(null)
+
+  const showToast = useCallback(() => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToastVisible(true)
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastVisible(false)
+      toastTimerRef.current = null
+    }, 3000)
+  }, [])
 
   const animCancel = useRef<(() => void) | null>(null)
   const browseViewport = useRef<Viewport | null>(null)
@@ -219,18 +229,24 @@ export default function WallCanvas() {
   // ── enter / exit draw mode ────────────────────────────────────────────────
   const enterDraw = useCallback(async () => {
     if (mode !== 'browse') return
-    setLocationStatus('requesting')
 
+    if (permissionState === 'denied' || permissionState === 'unsupported') {
+      showToast()
+      return
+    }
+
+    setLocationStatus('requesting')
     const result = await captureLocationForSession()
+    setLocationStatus('idle')
+
     if (!result || result === 'denied') {
-      setLocationStatus('idle')  // hook will reactively hide button if truly denied
+      showToast()
       return
     }
 
     const world = latLngToWorld(result.lat, result.lng)
     setLocationWorld(world)
     locationWorldRef.current = world
-    setLocationStatus('idle')
 
     browseViewport.current = viewportRef.current
     const target = viewportCenteredOn(
@@ -244,7 +260,7 @@ export default function WallCanvas() {
       vp => setViewport(vp),
       () => setMode('draw'),
     )
-  }, [mode])
+  }, [mode, permissionState, showToast])
 
   const exitDraw = useCallback(() => {
     if (mode !== 'draw') return
@@ -407,35 +423,43 @@ export default function WallCanvas() {
           alignItems: 'center',
           gap: 8,
         }}>
-          {permissionState === 'denied' ? (
-            <span style={{
+          <button
+            onClick={enterDraw}
+            disabled={locationStatus === 'requesting'}
+            style={{
+              height: 48,
+              padding: '0 28px',
+              background: locationStatus === 'requesting' ? '#888' : '#1a1a1a',
+              color: '#faf7f2',
+              border: 'none',
+              borderRadius: 24,
+              cursor: locationStatus === 'requesting' ? 'default' : 'pointer',
+              fontSize: 15,
+              fontFamily: 'ui-monospace, monospace',
+              letterSpacing: '0.06em',
+              boxShadow: '0 2px 12px rgba(0,0,0,0.18)',
+            }}
+          >
+            {locationStatus === 'requesting' ? 'Locating…' : 'Doodle'}
+          </button>
+          {toastVisible && (
+            <div style={{
+              position: 'fixed',
+              top: 24,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              padding: '8px 16px',
+              background: '#1a1a1a',
+              color: '#faf7f2',
+              borderRadius: 20,
               fontSize: 13,
               fontFamily: 'ui-monospace, monospace',
-              color: '#888',
               letterSpacing: '0.04em',
+              pointerEvents: 'none',
+              whiteSpace: 'nowrap',
             }}>
               Enable location to draw
-            </span>
-          ) : (
-            <button
-              onClick={enterDraw}
-              disabled={locationStatus === 'requesting'}
-              style={{
-                height: 48,
-                padding: '0 28px',
-                background: locationStatus === 'requesting' ? '#888' : '#1a1a1a',
-                color: '#faf7f2',
-                border: 'none',
-                borderRadius: 24,
-                cursor: locationStatus === 'requesting' ? 'default' : 'pointer',
-                fontSize: 15,
-                fontFamily: 'ui-monospace, monospace',
-                letterSpacing: '0.06em',
-                boxShadow: '0 2px 12px rgba(0,0,0,0.18)',
-              }}
-            >
-              {locationStatus === 'requesting' ? 'Locating…' : 'Doodle'}
-            </button>
+            </div>
           )}
         </div>
       )}
