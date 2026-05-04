@@ -1,12 +1,14 @@
-import { TUNING } from '../config/tuning'
+import { supabase } from './supabase'
 
-export function getCurrentPrompt(): string {
-  const now = new Date()
-  const isBeforeRotation = now.getHours() < TUNING.prompts.rotationHour
-  const effectiveDate = isBeforeRotation
-    ? new Date(now.getTime() - 24 * 60 * 60 * 1000)
-    : now
-  const daysSinceEpoch = Math.floor(effectiveDate.getTime() / (24 * 60 * 60 * 1000))
-  const index = daysSinceEpoch % TUNING.prompts.list.length
-  return TUNING.prompts.list[index]
+let cached: { text: string; date: string } | null = null
+
+export async function getCurrentPrompt(): Promise<string> {
+  const today = new Date().toISOString().split('T')[0]
+  if (cached?.date === today) return cached.text
+
+  const { data, error } = await supabase.rpc('get_or_create_daily_prompt')
+  if (error || !data || data.length === 0) return ''
+
+  cached = { text: data[0].text, date: today }
+  return cached.text
 }

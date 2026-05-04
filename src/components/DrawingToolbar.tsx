@@ -49,21 +49,25 @@ export default function DrawingToolbar({ selectedColor, onColorSelect, onDone, p
         pointerEvents: 'auto',
         maxWidth: 340,
       }}>
-        {/* Prompt */}
-        <div style={{
-          fontFamily: "Georgia, 'Times New Roman', serif",
-          fontStyle: 'italic',
-          fontSize: 13,
-          color: '#3a3530',
-          textAlign: 'center',
-          lineHeight: 1.4,
-          paddingBottom: 2,
-        }}>
-          {prompt}
-        </div>
+        {/* Prompt — hidden when empty (loading or no prompts available) */}
+        {prompt && (
+          <>
+            <div style={{
+              fontFamily: "Georgia, 'Times New Roman', serif",
+              fontStyle: 'italic',
+              fontSize: 13,
+              color: '#3a3530',
+              textAlign: 'center',
+              lineHeight: 1.4,
+              paddingBottom: 2,
+            }}>
+              {prompt}
+            </div>
 
-        {/* Divider */}
-        <div style={{ width: '100%', height: 1, background: '#d8d2c8' }} />
+            {/* Divider */}
+            <div style={{ width: '100%', height: 1, background: '#d8d2c8' }} />
+          </>
+        )}
 
         {/* Color swatches + budget + done */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

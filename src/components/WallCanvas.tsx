@@ -98,6 +98,9 @@ export default function WallCanvas() {
   const [selectedColor, setSelectedColor] = useState(0)
   const [pixelVersion, setPixelVersion] = useState(0)
   const [syncError, setSyncError] = useState(false)
+  const [promptText, setPromptText] = useState('')
+
+  useEffect(() => { getCurrentPrompt().then(setPromptText) }, [])
 
   // GPS state — null until captured when entering draw mode
   const [locationWorld, setLocationWorld] = useState<{ x: number; y: number } | null>(null)
@@ -540,7 +543,7 @@ export default function WallCanvas() {
           selectedColor={selectedColor}
           onColorSelect={setSelectedColor}
           onDone={exitDraw}
-          prompt={getCurrentPrompt()}
+          prompt={promptText}
         />
       )}
     </div>
