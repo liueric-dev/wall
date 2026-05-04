@@ -26,6 +26,7 @@ export const TUNING = {
   rendering: {
     pixelSizeFeet: 10,
     tileSize: 256,
+    neighborhoodZoom: 3,
   },
 
   prompts: {

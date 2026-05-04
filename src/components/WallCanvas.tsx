@@ -16,6 +16,8 @@ import { PALETTE } from '../data/testDoodles'
 import { loadBudgetState, saveBudgetState, getCurrentBudget, deductBudget } from '../lib/budget'
 import { getCurrentPrompt } from '../lib/prompts'
 import { TUNING } from '../config/tuning'
+import { pickRandomNeighborhood } from '../config/neighborhoods'
+import { getRecentSavedPosition, savePosition } from '../lib/savedPosition'
 import {
   insertPixelEvent, loadViewportPixels, deletePixelEvents, upsertTile,
 } from '../lib/pixelApi'
@@ -68,14 +70,25 @@ function getViewportBounds(vp: Viewport, size: { w: number; h: number }): Bounds
   }
 }
 
+const prefersReducedMotion = () =>
+  window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
 // ────────────────────────────────────────────────────────────────────────────
 
 export default function WallCanvas() {
   const containerRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight })
-  const [viewport, setViewport] = useState<Viewport>(() =>
-    initialViewport(window.innerWidth, window.innerHeight)
-  )
+  const [viewport, setViewport] = useState<Viewport>(() => {
+    const saved = getRecentSavedPosition()
+    if (saved) {
+      return viewportCenteredOn(saved.centerX, saved.centerY, saved.zoom,
+        window.innerWidth, window.innerHeight)
+    }
+    const n = pickRandomNeighborhood()
+    const world = latLngToWorld(n.lat, n.lng)
+    return viewportCenteredOn(world.x, world.y, TUNING.rendering.neighborhoodZoom,
+      window.innerWidth, window.innerHeight)
+  })
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
   const sizeRef = useRef(size)
@@ -107,6 +120,7 @@ export default function WallCanvas() {
 
   const animCancel = useRef<(() => void) | null>(null)
   const browseViewport = useRef<Viewport | null>(null)
+  const initialCenterDone = useRef(false)
 
   // draw gesture state
   const pointers = useRef(new Map<number, { x: number; y: number }>())
@@ -161,6 +175,37 @@ export default function WallCanvas() {
     if (containerRef.current) ro.observe(containerRef.current)
     return () => ro.disconnect()
   }, [])
+
+  // ── save position to localStorage, debounced 1s after pan/zoom stops ──────
+  const saveTimerRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
+    saveTimerRef.current = window.setTimeout(() => {
+      savePosition(viewportRef.current, sizeRef.current.w, sizeRef.current.h)
+    }, 1000)
+  }, [viewport])
+
+  // ── GPS refinement: animate to actual location once on granted permission ──
+  useEffect(() => {
+    if (permissionState !== 'granted') return
+    if (initialCenterDone.current) return
+    initialCenterDone.current = true
+    captureLocationForSession().then(result => {
+      if (!result || result === 'denied') return
+      if (mode !== 'browse') return
+      const world = latLngToWorld(result.lat, result.lng)
+      const target = viewportCenteredOn(world.x, world.y,
+        TUNING.rendering.neighborhoodZoom, sizeRef.current.w, sizeRef.current.h)
+      if (animCancel.current) animCancel.current()
+      if (prefersReducedMotion()) {
+        setViewport(target)
+      } else {
+        animCancel.current = animateViewportTo(viewportRef.current, target, 1000,
+          vp => setViewport(vp), () => {})
+      }
+    })
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [permissionState])
 
   // ── place a single pixel ──────────────────────────────────────────────────
   const placePixel = useCallback((
@@ -254,24 +299,34 @@ export default function WallCanvas() {
       DRAW_SCALE,
       sizeRef.current.w, sizeRef.current.h,
     )
-    setMode('animating')
-    animCancel.current = animateViewportTo(
-      viewportRef.current, target, TUNING.viewport.animDurationMs,
-      vp => setViewport(vp),
-      () => setMode('draw'),
-    )
+    if (prefersReducedMotion()) {
+      setViewport(target)
+      setMode('draw')
+    } else {
+      setMode('animating')
+      animCancel.current = animateViewportTo(
+        viewportRef.current, target, TUNING.viewport.animDurationMs,
+        vp => setViewport(vp),
+        () => setMode('draw'),
+      )
+    }
   }, [mode, permissionState, showToast])
 
   const exitDraw = useCallback(() => {
     if (mode !== 'draw') return
     clearLockedLocation()
     const target = browseViewport.current ?? initialViewport(sizeRef.current.w, sizeRef.current.h)
-    setMode('animating')
-    animCancel.current = animateViewportTo(
-      viewportRef.current, target, TUNING.viewport.animDurationMs,
-      vp => setViewport(vp),
-      () => setMode('browse'),
-    )
+    if (prefersReducedMotion()) {
+      setViewport(target)
+      setMode('browse')
+    } else {
+      setMode('animating')
+      animCancel.current = animateViewportTo(
+        viewportRef.current, target, TUNING.viewport.animDurationMs,
+        vp => setViewport(vp),
+        () => setMode('browse'),
+      )
+    }
   }, [mode])
 
   // ── pointer handlers ──────────────────────────────────────────────────────
