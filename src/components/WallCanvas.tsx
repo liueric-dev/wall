@@ -456,6 +456,10 @@ export default function WallCanvas() {
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
     if (mode === 'animating') return
+    // Firefox synthesizes wheel events with ctrlKey from pinch gestures (trackpad
+    // and some mobile cases). These can fire post-gesture and cause runaway zoom.
+    // Touch pinch is handled via pointer events; ignore the synthetic wheel form.
+    if (e.ctrlKey) return
     setViewport(vp => clampViewport(zoomAt(vp, e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 1 / 1.1), sizeRef.current.w, sizeRef.current.h))
   }, [mode])
 
