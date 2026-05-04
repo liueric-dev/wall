@@ -43,6 +43,14 @@ export default function PixelLayer({ viewport, width, height, pixelVersion }: Pr
     if (!ctx) return
     const vp = viewportRef.current
 
+    const dpr = window.devicePixelRatio || 1
+    const bw = Math.round(width * dpr)
+    const bh = Math.round(height * dpr)
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw
+      canvas.height = bh
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
     ctx.clearRect(0, 0, width, height)
     ctx.imageSmoothingEnabled = false
 
@@ -121,9 +129,15 @@ export default function PixelLayer({ viewport, width, height, pixelVersion }: Pr
   return (
     <canvas
       ref={canvasRef}
-      width={width}
-      height={height}
-      style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: `${width}px`,
+        height: `${height}px`,
+        pointerEvents: 'none',
+        imageRendering: 'pixelated',
+      }}
     />
   )
 }

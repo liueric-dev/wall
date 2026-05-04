@@ -51,6 +51,15 @@ export default function BaseMapLayer({ viewport, width, height }: Props) {
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
+    const dpr = window.devicePixelRatio || 1
+    const bw = Math.round(width * dpr)
+    const bh = Math.round(height * dpr)
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw
+      canvas.height = bh
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+
     ctx.fillStyle = '#faf7f2'
     ctx.fillRect(0, 0, width, height)
 
@@ -78,9 +87,13 @@ export default function BaseMapLayer({ viewport, width, height }: Props) {
   return (
     <canvas
       ref={canvasRef}
-      width={width}
-      height={height}
-      style={{ position: 'absolute', top: 0, left: 0 }}
+      style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        width: `${width}px`,
+        height: `${height}px`,
+      }}
     />
   )
 }

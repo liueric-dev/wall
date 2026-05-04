@@ -128,6 +128,7 @@ export default function WallCanvas() {
   // draw gesture state
   const pointers = useRef(new Map<number, { x: number; y: number }>())
   const lastPinchDist = useRef<number | null>(null)
+  const lastPinchMid = useRef<{ x: number; y: number } | null>(null)
   const drawActive = useRef(false)
   const drawStartScreen = useRef<{ x: number; y: number } | null>(null)
   const hasDragged = useRef(false)
@@ -354,16 +355,25 @@ export default function WallCanvas() {
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     const active = Array.from(pointers.current.values())
 
-    // Two-finger pan/zoom works in all non-animating modes
+    // Two-finger pan + zoom (centroid translates, distance scales)
     if (active.length >= 2) {
       const [p0, p1] = active
       const dist = Math.hypot(p1.x - p0.x, p1.y - p0.y)
       const midX = (p0.x + p1.x) / 2
       const midY = (p0.y + p1.y) / 2
-      if (lastPinchDist.current !== null) {
-        setViewport(vp => clampViewport(zoomAt(vp, midX, midY, dist / lastPinchDist.current!), sizeRef.current.w, sizeRef.current.h))
+
+      if (lastPinchDist.current !== null && lastPinchMid.current !== null) {
+        const lastMid = lastPinchMid.current
+        const factor = dist / lastPinchDist.current
+        setViewport(vp => {
+          const panned = panViewport(vp, midX - lastMid.x, midY - lastMid.y)
+          const zoomed = zoomAt(panned, midX, midY, factor)
+          return clampViewport(zoomed, sizeRef.current.w, sizeRef.current.h)
+        })
       }
+
       lastPinchDist.current = dist
+      lastPinchMid.current = { x: midX, y: midY }
       return
     }
 
@@ -407,7 +417,10 @@ export default function WallCanvas() {
     const wasDrawing = drawActive.current
 
     pointers.current.delete(e.pointerId)
-    if (pointers.current.size < 2) lastPinchDist.current = null
+    if (pointers.current.size < 2) {
+      lastPinchDist.current = null
+      lastPinchMid.current = null
+    }
 
     if (mode === 'draw' && wasDrawing) {
       drawActive.current = false
