@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { latLngToWorld, worldToScreen } from '../lib/coordinates'
 import { NYC_BOROUGHS } from '../data/nycGeo'
 import { NYC_PARKS } from '../data/nycParks'
+import { OUTLINE_COLOR } from '../data/testDoodles'
 import type { Viewport } from '../lib/viewport'
 
 // Pre-convert park rings from [lng, lat] to world coords
@@ -40,9 +41,10 @@ interface Props {
   viewport: Viewport
   width: number
   height: number
+  pass: 'fills' | 'outlines'
 }
 
-export default function BaseMapLayer({ viewport, width, height }: Props) {
+export default function BaseMapLayer({ viewport, width, height, pass }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
 
   useEffect(() => {
@@ -59,30 +61,39 @@ export default function BaseMapLayer({ viewport, width, height }: Props) {
       canvas.height = bh
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    ctx.clearRect(0, 0, width, height)
 
-    ctx.fillStyle = '#faf7f2'
-    ctx.fillRect(0, 0, width, height)
+    if (pass === 'fills') {
+      // Background cream + borough land tint. Renders below pixels.
+      ctx.fillStyle = '#faf7f2'
+      ctx.fillRect(0, 0, width, height)
 
-    ctx.strokeStyle = '#2a2a2a'
-    ctx.lineWidth = 1
+      ctx.fillStyle = '#f4efe6'
+      for (const rings of Object.values(BOROUGHS_WORLD)) {
+        for (const ring of rings) {
+          drawRing(ctx, ring, viewport)
+          ctx.fill()
+        }
+      }
+    } else {
+      // Borough/coastline outlines + park outlines. Renders above pixels.
+      ctx.strokeStyle = OUTLINE_COLOR
+      ctx.lineWidth = 1
+      for (const rings of Object.values(BOROUGHS_WORLD)) {
+        for (const ring of rings) {
+          drawRing(ctx, ring, viewport)
+          ctx.stroke()
+        }
+      }
 
-    for (const rings of Object.values(BOROUGHS_WORLD)) {
-      for (const ring of rings) {
+      ctx.strokeStyle = '#8faa85'
+      ctx.lineWidth = 1
+      for (const ring of PARKS_WORLD) {
         drawRing(ctx, ring, viewport)
-        ctx.fillStyle = '#f4efe6'
-        ctx.fill()
         ctx.stroke()
       }
     }
-
-    ctx.strokeStyle = '#8faa85'
-    ctx.lineWidth = 1
-
-    for (const ring of PARKS_WORLD) {
-      drawRing(ctx, ring, viewport)
-      ctx.stroke()
-    }
-  }, [viewport, width, height])
+  }, [viewport, width, height, pass])
 
   return (
     <canvas
@@ -93,6 +104,7 @@ export default function BaseMapLayer({ viewport, width, height }: Props) {
         left: 0,
         width: `${width}px`,
         height: `${height}px`,
+        pointerEvents: 'none',
       }}
     />
   )

@@ -47,7 +47,6 @@ export default function DrawingToolbar({ selectedColor, onColorSelect, onDone, p
         marginBottom: 24,
         boxShadow: '0 2px 12px rgba(0,0,0,0.10)',
         pointerEvents: 'auto',
-        maxWidth: 340,
       }}>
         {/* Prompt — hidden when empty (loading or no prompts available) */}
         {prompt && (

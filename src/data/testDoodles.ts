@@ -12,6 +12,10 @@ export const PALETTE = [
   '#2a2a2a', // 7 soft black
 ]
 
+// Reserved for base-map outlines. Must NOT appear in PALETTE — keeps the city
+// visually distinct from any user contribution.
+export const OUTLINE_COLOR = '#a89a8c'
+
 export interface Pixel {
   x: number
   y: number

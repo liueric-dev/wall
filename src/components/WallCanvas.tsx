@@ -139,6 +139,9 @@ export default function WallCanvas() {
   const drawStartScreen = useRef<{ x: number; y: number } | null>(null)
   const drawStartedAt = useRef(0)
   const hasDragged = useRef(false)
+  const spaceHeld = useRef(false)
+  const panActive = useRef(false)
+  const panPrevScreen = useRef<{ x: number; y: number } | null>(null)
   const drawGroupId = useRef<string | null>(null)
   const drawGroupSeq = useRef(0)
   const lastDrawPixel = useRef<{ x: number; y: number } | null>(null)
@@ -174,6 +177,30 @@ export default function WallCanvas() {
     const id = setTimeout(() => setSyncError(false), 3000)
     return () => clearTimeout(id)
   }, [syncError])
+
+  // ── spacebar tracking for desktop pan-in-draw-mode ────────────────────────
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      spaceHeld.current = true
+      e.preventDefault()
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.code !== 'Space') return
+      spaceHeld.current = false
+    }
+    const onBlur = () => { spaceHeld.current = false }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+    }
+  }, [])
 
   // ── resize ────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -381,6 +408,14 @@ export default function WallCanvas() {
       armPinch()
     }
 
+    // Desktop pan in draw mode: right-click (mouse) or spacebar held + left-click.
+    const isRightClick = e.button === 2 && e.pointerType === 'mouse'
+    if (mode === 'draw' && pointers.current.size === 1 && (isRightClick || spaceHeld.current)) {
+      panActive.current = true
+      panPrevScreen.current = { x: e.clientX, y: e.clientY }
+      return
+    }
+
     if (mode === 'draw' && pointers.current.size === 1) {
       drawActive.current = true
       drawStartScreen.current = { x: e.clientX, y: e.clientY }
@@ -444,6 +479,19 @@ export default function WallCanvas() {
       return
     }
 
+    // Desktop pan in draw mode (right-click or spacebar+left-click).
+    if (panActive.current) {
+      const last = panPrevScreen.current!
+      const dx = e.clientX - last.x
+      const dy = e.clientY - last.y
+      panPrevScreen.current = { x: e.clientX, y: e.clientY }
+      setViewport(vp => clampViewport(
+        panViewport(vp, dx, dy),
+        sizeRef.current.w, sizeRef.current.h, mode, locationWorldRef.current,
+      ))
+      return
+    }
+
     if (mode === 'browse') {
       // Single finger pan in browse mode
       setViewport(vp => clampViewport(panViewport(vp, e.clientX - prev.x, e.clientY - prev.y), sizeRef.current.w, sizeRef.current.h, mode, locationWorldRef.current))
@@ -494,6 +542,11 @@ export default function WallCanvas() {
       if (e.pointerId === idA || e.pointerId === idB) {
         disarmPinch()
       }
+    }
+
+    if (panActive.current) {
+      panActive.current = false
+      panPrevScreen.current = null
     }
 
     if (mode === 'draw' && wasDrawing) {
@@ -549,9 +602,11 @@ export default function WallCanvas() {
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onWheel={onWheel}
+      onContextMenu={(e) => e.preventDefault()}
     >
-      <BaseMapLayer viewport={viewport} width={size.w} height={size.h} />
+      <BaseMapLayer viewport={viewport} width={size.w} height={size.h} pass="fills" />
       <PixelLayer viewport={viewport} width={size.w} height={size.h} pixelVersion={pixelVersion} />
+      <BaseMapLayer viewport={viewport} width={size.w} height={size.h} pass="outlines" />
 
       {mode === 'draw' && locationWorld && (
         <RadiusOverlay
