@@ -127,8 +127,13 @@ export default function WallCanvas() {
 
   // draw gesture state
   const pointers = useRef(new Map<number, { x: number; y: number }>())
-  const lastPinchDist = useRef<number | null>(null)
-  const lastPinchMid = useRef<{ x: number; y: number } | null>(null)
+  const pinchPair = useRef<{ idA: number; idB: number } | null>(null)
+  const pinchAnchor = useRef<{
+    dist: number
+    midX: number
+    midY: number
+    viewport: Viewport
+  } | null>(null)
   const drawActive = useRef(false)
   const drawStartScreen = useRef<{ x: number; y: number } | null>(null)
   const hasDragged = useRef(false)
@@ -275,9 +280,34 @@ export default function WallCanvas() {
     return true
   }, [selectedColor, setSyncError])
 
+  // ── pinch lifecycle ───────────────────────────────────────────────────────
+  const armPinch = useCallback(() => {
+    const ids = Array.from(pointers.current.keys())
+    if (ids.length < 2) return
+    const [idA, idB] = ids
+    const a = pointers.current.get(idA)!
+    const b = pointers.current.get(idB)!
+    pinchPair.current = { idA, idB }
+    pinchAnchor.current = {
+      dist: Math.max(1, Math.hypot(b.x - a.x, b.y - a.y)),
+      midX: (a.x + b.x) / 2,
+      midY: (a.y + b.y) / 2,
+      viewport: viewportRef.current,
+    }
+    drawActive.current = false
+    hasDragged.current = false
+  }, [])
+
+  const disarmPinch = useCallback(() => {
+    pinchPair.current = null
+    pinchAnchor.current = null
+  }, [])
+
   // ── enter / exit draw mode ────────────────────────────────────────────────
   const enterDraw = useCallback(async () => {
     if (mode !== 'browse') return
+    disarmPinch()
+    pointers.current.clear()
 
     if (permissionState === 'denied' || permissionState === 'unsupported') {
       showToast()
@@ -314,10 +344,12 @@ export default function WallCanvas() {
         () => setMode('draw'),
       )
     }
-  }, [mode, permissionState, showToast])
+  }, [mode, permissionState, showToast, disarmPinch])
 
   const exitDraw = useCallback(() => {
     if (mode !== 'draw') return
+    disarmPinch()
+    pointers.current.clear()
     clearLockedLocation()
     const target = browseViewport.current ?? initialViewport(sizeRef.current.w, sizeRef.current.h)
     if (prefersReducedMotion()) {
@@ -331,13 +363,17 @@ export default function WallCanvas() {
         () => setMode('browse'),
       )
     }
-  }, [mode])
+  }, [mode, disarmPinch])
 
   // ── pointer handlers ──────────────────────────────────────────────────────
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button')) return
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+
+    if (pointers.current.size === 2 && !pinchPair.current) {
+      armPinch()
+    }
 
     if (mode === 'draw' && pointers.current.size === 1) {
       drawActive.current = true
@@ -347,33 +383,41 @@ export default function WallCanvas() {
       drawGroupSeq.current = 0
       lastDrawPixel.current = null
     }
-  }, [mode])
+  }, [mode, armPinch])
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     if (!pointers.current.has(e.pointerId)) return
     const prev = pointers.current.get(e.pointerId)!
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
-    const active = Array.from(pointers.current.values())
 
-    // Two-finger pan + zoom (centroid translates, distance scales)
-    if (active.length >= 2) {
-      const [p0, p1] = active
-      const dist = Math.hypot(p1.x - p0.x, p1.y - p0.y)
-      const midX = (p0.x + p1.x) / 2
-      const midY = (p0.y + p1.y) / 2
+    // Two-finger pan + zoom: locked pair, anchor-based math (idempotent).
+    if (pinchPair.current && pinchAnchor.current) {
+      const { idA, idB } = pinchPair.current
+      const a = pointers.current.get(idA)
+      const b = pointers.current.get(idB)
 
-      if (lastPinchDist.current !== null && lastPinchMid.current !== null) {
-        const lastMid = lastPinchMid.current
-        const factor = dist / lastPinchDist.current
-        setViewport(vp => {
-          const panned = panViewport(vp, midX - lastMid.x, midY - lastMid.y)
-          const zoomed = zoomAt(panned, midX, midY, factor)
-          return clampViewport(zoomed, sizeRef.current.w, sizeRef.current.h)
-        })
+      if (!a || !b) {
+        disarmPinch()
+        if (pointers.current.size >= 2) armPinch()
+        return
       }
 
-      lastPinchDist.current = dist
-      lastPinchMid.current = { x: midX, y: midY }
+      const dist = Math.max(1, Math.hypot(b.x - a.x, b.y - a.y))
+      const midX = (a.x + b.x) / 2
+      const midY = (a.y + b.y) / 2
+
+      const anchor = pinchAnchor.current
+      const rawFactor = dist / anchor.dist
+      const factor = Math.max(0.05, Math.min(20, rawFactor))
+
+      const dx = midX - anchor.midX
+      const dy = midY - anchor.midY
+
+      setViewport(() => {
+        const panned = panViewport(anchor.viewport, dx, dy)
+        const zoomed = zoomAt(panned, midX, midY, factor)
+        return clampViewport(zoomed, sizeRef.current.w, sizeRef.current.h)
+      })
       return
     }
 
@@ -411,15 +455,17 @@ export default function WallCanvas() {
         lastDrawPixel.current = curr
       }
     }
-  }, [mode, placePixel])
+  }, [mode, placePixel, armPinch, disarmPinch])
 
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     const wasDrawing = drawActive.current
 
     pointers.current.delete(e.pointerId)
-    if (pointers.current.size < 2) {
-      lastPinchDist.current = null
-      lastPinchMid.current = null
+    if (pinchPair.current) {
+      const { idA, idB } = pinchPair.current
+      if (e.pointerId === idA || e.pointerId === idB) {
+        disarmPinch()
+      }
     }
 
     if (mode === 'draw' && wasDrawing) {
@@ -451,7 +497,7 @@ export default function WallCanvas() {
       drawGroupSeq.current = 0
       lastDrawPixel.current = null
     }
-  }, [mode, placePixel])
+  }, [mode, placePixel, disarmPinch])
 
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
