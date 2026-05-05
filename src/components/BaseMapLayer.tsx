@@ -77,8 +77,14 @@ export default function BaseMapLayer({ viewport, width, height, pass }: Props) {
       }
     } else {
       // Borough/coastline outlines + park outlines. Renders above pixels.
+      // Stroke weight scales inversely with zoom so outlines stay visible
+      // when zoomed out and don't dominate pixel art when zoomed in.
+      const lineWidth = viewport.scale >= 12 ? 1
+                      : viewport.scale >= 8  ? 1.5
+                      :                        2
+
       ctx.strokeStyle = OUTLINE_COLOR
-      ctx.lineWidth = 1
+      ctx.lineWidth = lineWidth
       for (const rings of Object.values(BOROUGHS_WORLD)) {
         for (const ring of rings) {
           drawRing(ctx, ring, viewport)
@@ -87,7 +93,7 @@ export default function BaseMapLayer({ viewport, width, height, pass }: Props) {
       }
 
       ctx.strokeStyle = '#8faa85'
-      ctx.lineWidth = 1
+      ctx.lineWidth = lineWidth
       for (const ring of PARKS_WORLD) {
         drawRing(ctx, ring, viewport)
         ctx.stroke()
