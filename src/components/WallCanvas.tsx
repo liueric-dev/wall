@@ -24,6 +24,7 @@ import {
 } from '../lib/pixelApi'
 import type { Bounds } from '../lib/pixelApi'
 import { startPolling } from '../lib/polling'
+import { applyIncomingEvents, subscribeToEvents } from '../lib/eventHandler'
 import BaseMapLayer from './BaseMapLayer'
 import PixelLayer from './PixelLayer'
 import RadiusOverlay from './RadiusOverlay'
@@ -154,21 +155,20 @@ export default function WallCanvas() {
   useEffect(() => {
     localStorage.removeItem('wall_events')  // throw away legacy localStorage pixels
     const bounds = getViewportBounds(viewportRef.current, sizeRef.current)
-    loadViewportPixels(bounds).then(pixels => {
-      pixels.forEach(p => setPixel(p.x, p.y, p.colorIdx))
-      if (pixels.length > 0) setPixelVersion(v => v + 1)
-    })
+    loadViewportPixels(bounds).then(applyIncomingEvents)
   }, [])
 
-  // ── polling: new pixels from other users every 5s ────────────────────────
+  // ── polling: mode-aware, paused when backgrounded ────────────────────────
   useEffect(() => {
     return startPolling(
       () => getViewportBounds(viewportRef.current, sizeRef.current),
-      (pixels) => {
-        pixels.forEach(p => setPixel(p.x, p.y, p.colorIdx))
-        setPixelVersion(v => v + 1)
-      },
+      () => mode,
     )
+  }, [mode])
+
+  // ── re-render when incoming events apply to the pixel store ──────────────
+  useEffect(() => {
+    return subscribeToEvents(() => setPixelVersion(v => v + 1))
   }, [])
 
   // ── auto-clear sync error after 3s ───────────────────────────────────────

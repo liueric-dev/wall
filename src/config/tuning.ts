@@ -28,4 +28,9 @@ export const TUNING = {
     tileSize: 256,
     neighborhoodZoom: 3,
   },
+
+  polling: {
+    drawIntervalMs: 2000,
+    browseIntervalMs: 5000,
+  },
 } as const
