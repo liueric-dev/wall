@@ -1,5 +1,5 @@
 import { LOCATIONS } from '../lib/location'
-import { setDevOverride } from '../lib/geolocation'
+import { setDevOverride, setDevUnbounded } from '../lib/geolocation'
 
 const DEV_LOCATIONS = Object.values(LOCATIONS)
 
@@ -11,6 +11,7 @@ export default function DevLocationMenu() {
     const loc = DEV_LOCATIONS.find(l => l.name === name)
     if (!loc) return
     setDevOverride({ lat: loc.lat, lng: loc.lng })
+    setDevUnbounded(loc.name.startsWith('birb'))
   }
 
   return (

@@ -38,7 +38,24 @@ export const TUNING = {
 } as const
 
 // Drawable palette — source of truth. Reordering is safe; storage is hex.
-export const PALETTE: readonly string[] = [
+export const PALETTE = [
+  '#1a1a1a', // Black
+  '#f0ebe0', // Off-white
+  '#e63946', // Red
+  '#ed8a3a', // Orange
+  '#f0c52a', // Yellow
+  '#57a66d', // green
+  '#3d8eb9', // blue
+  '#ed6b96', // Pink
+  '#7a5db0', // Purple
+  '#8b5d40', // Brown
+] as const
+
+// Reserved for base-map outlines. Must NOT appear in PALETTE.
+export const OUTLINE_COLOR = '#a89a8c'
+
+
+export const PALETTE1: readonly string[] = [
   '#1a1a1a', // black
   '#f0ebe0', // off-white
   '#e63946', // red
@@ -50,6 +67,3 @@ export const PALETTE: readonly string[] = [
   '#9575cd', // purple
   '#8b5a3c', // brown
 ] as const
-
-// Reserved for base-map outlines. Must NOT appear in PALETTE.
-export const OUTLINE_COLOR = '#a89a8c'

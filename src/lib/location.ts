@@ -15,6 +15,7 @@ export const LOCATIONS: Record<string, Location> = {
   eastvillage:  { name: 'East Village',     lat: 40.7265, lng: -73.9815 },
   midtown:      { name: 'Midtown',          lat: 40.7549, lng: -73.9840 },
   upperwestside: { name: 'Upper West Side', lat: 40.7870, lng: -73.9754 },
+  birb:         { name: 'birb (dev: unbounded)', lat: 40.7549, lng: -73.9840 },
 }
 
 export const DRAW_RADIUS = TUNING.radius.pixels

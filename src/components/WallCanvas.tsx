@@ -7,7 +7,7 @@ import {
 } from '../lib/viewport'
 import type { Viewport } from '../lib/viewport'
 import { DRAW_RADIUS } from '../lib/location'
-import { captureLocationForSession, clearLockedLocation } from '../lib/geolocation'
+import { captureLocationForSession, clearLockedLocation, getDevUnbounded } from '../lib/geolocation'
 import { usePermissionState } from '../lib/usePermissionState'
 import type { PixelEvent } from '../lib/events'
 import { getOrCreateSessionId, generateId } from '../lib/session'
@@ -222,9 +222,11 @@ export default function WallCanvas() {
     if (!loc) return false
     // bounds check
     if (wx < 0 || wy < 0) return false
-    // radius check
-    const dx = wx - loc.x, dy = wy - loc.y
-    if (Math.hypot(dx, dy) > DRAW_RADIUS) return false
+    // radius check (skipped in dev "birb" mode)
+    if (!getDevUnbounded()) {
+      const dx = wx - loc.x, dy = wy - loc.y
+      if (Math.hypot(dx, dy) > DRAW_RADIUS) return false
+    }
     // no-op: tapping a pixel that's already this color does nothing
     if (getPixel(wx, wy) === selectedColor) return false
     // budget check
@@ -316,10 +318,9 @@ export default function WallCanvas() {
     locationWorldRef.current = world
 
     browseViewport.current = viewportRef.current
-    const targetScale = Math.max(
-      DRAW_SCALE,
-      drawModeMinScale(sizeRef.current.w, sizeRef.current.h),
-    )
+    const targetScale = getDevUnbounded()
+      ? DRAW_SCALE
+      : Math.max(DRAW_SCALE, drawModeMinScale(sizeRef.current.w, sizeRef.current.h))
     const target = viewportCenteredOn(
       world.x, world.y,
       targetScale,
@@ -413,19 +414,21 @@ export default function WallCanvas() {
       const dy = midY - anchor.midY
 
       const w = sizeRef.current.w, h = sizeRef.current.h
-      const minScaleEff = effectiveMinScale(mode, w, h)
+      const effMode = getDevUnbounded() ? 'browse' : mode
+      const effLoc = getDevUnbounded() ? null : locationWorldRef.current
+      const minScaleEff = effectiveMinScale(effMode, w, h)
       const desiredScale = anchor.viewport.scale * factor
       const finalScale = Math.max(minScaleEff, Math.min(MAX_SCALE, desiredScale))
       const effectiveFactor = finalScale / anchor.viewport.scale
 
-      const atDrawCap = mode === 'draw' && Math.abs(finalScale - drawModeMinScale(w, h)) < 1e-4
+      const atDrawCap = effMode === 'draw' && Math.abs(finalScale - drawModeMinScale(w, h)) < 1e-4
       const effDx = atDrawCap ? 0 : dx
       const effDy = atDrawCap ? 0 : dy
 
       setViewport(() => {
         const panned = panViewport(anchor.viewport, effDx, effDy)
         const zoomed = zoomAt(panned, midX, midY, effectiveFactor)
-        return clampViewport(zoomed, w, h, mode, locationWorldRef.current)
+        return clampViewport(zoomed, w, h, effMode, effLoc)
       })
       return
     }
@@ -436,9 +439,11 @@ export default function WallCanvas() {
       const dx = e.clientX - last.x
       const dy = e.clientY - last.y
       panPrevScreen.current = { x: e.clientX, y: e.clientY }
+      const effMode = getDevUnbounded() ? 'browse' : mode
+      const effLoc = getDevUnbounded() ? null : locationWorldRef.current
       setViewport(vp => clampViewport(
         panViewport(vp, dx, dy),
-        sizeRef.current.w, sizeRef.current.h, mode, locationWorldRef.current,
+        sizeRef.current.w, sizeRef.current.h, effMode, effLoc,
       ))
       return
     }
@@ -455,9 +460,11 @@ export default function WallCanvas() {
 
       if (hasDragged.current) {
         // Pan in both modes; clampViewport applies the radius-clamp in draw mode.
+        const effMode = getDevUnbounded() ? 'browse' : mode
+        const effLoc = getDevUnbounded() ? null : locationWorldRef.current
         setViewport(vp => clampViewport(
           panViewport(vp, e.clientX - prev.x, e.clientY - prev.y),
-          sizeRef.current.w, sizeRef.current.h, mode, locationWorldRef.current,
+          sizeRef.current.w, sizeRef.current.h, effMode, effLoc,
         ))
       }
     }
@@ -500,15 +507,17 @@ export default function WallCanvas() {
     if (e.ctrlKey) return
     setViewport(vp => {
       const w = sizeRef.current.w, h = sizeRef.current.h
+      const effMode = getDevUnbounded() ? 'browse' : mode
+      const effLoc = getDevUnbounded() ? null : locationWorldRef.current
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
-      const minScaleEff = effectiveMinScale(mode, w, h)
+      const minScaleEff = effectiveMinScale(effMode, w, h)
       const desiredScale = vp.scale * factor
       const finalScale = Math.max(minScaleEff, Math.min(MAX_SCALE, desiredScale))
       if (Math.abs(finalScale - vp.scale) < 1e-4) return vp
       const effectiveFactor = finalScale / vp.scale
       return clampViewport(
         zoomAt(vp, e.clientX, e.clientY, effectiveFactor),
-        w, h, mode, locationWorldRef.current,
+        w, h, effMode, effLoc,
       )
     })
   }, [mode])
@@ -528,7 +537,7 @@ export default function WallCanvas() {
       <PixelLayer viewport={viewport} width={size.w} height={size.h} pixelVersion={pixelVersion} />
       <BaseMapLayer viewport={viewport} width={size.w} height={size.h} pass="outlines" />
 
-      {mode === 'draw' && locationWorld && (
+      {mode === 'draw' && locationWorld && !getDevUnbounded() && (
         <RadiusOverlay
           locationWorld={locationWorld}
           viewport={viewport}

@@ -63,6 +63,16 @@ export function getLockedLocation(): LocationState | null {
   return lockedLocation
 }
 
+let _devUnbounded = false
+
+export function setDevUnbounded(value: boolean): void {
+  _devUnbounded = value
+}
+
+export function getDevUnbounded(): boolean {
+  return _devUnbounded
+}
+
 export async function getPermissionState(): Promise<PermissionState> {
   if (!navigator.permissions) return 'prompt'
   try {
