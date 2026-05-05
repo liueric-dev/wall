@@ -80,7 +80,9 @@ export function clampViewport(
   const scale = Math.max(minScale, Math.min(MAX_SCALE, vp.scale))
   const worldW = WORLD_WIDTH * scale
   const worldH = WORLD_HEIGHT * scale
-  const pad = 100 // minimum px of world that must remain visible on each edge
+  // Minimum px of world that must remain visible on each edge.
+  // Scaled to screen so we don't allow huge blank margins past the city.
+  const pad = Math.min(screenW, screenH) * 0.8
   let originX = Math.max(pad - worldW, Math.min(screenW - pad, vp.originX))
   let originY = Math.max(pad - worldH, Math.min(screenH - pad, vp.originY))
 

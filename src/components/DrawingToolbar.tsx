@@ -33,6 +33,8 @@ export default function DrawingToolbar({ selectedColor, onColorSelect, onDone, p
       flexDirection: 'column',
       alignItems: 'center',
       pointerEvents: 'none',
+      userSelect: 'none',
+      WebkitUserSelect: 'none',
     }}>
       {/* Main toolbar pill */}
       <div style={{
