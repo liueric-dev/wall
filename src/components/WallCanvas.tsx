@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { screenToWorld, latLngToWorld } from '../lib/coordinates'
 import {
-  initialViewport, viewportCenteredOn, animateViewportTo,
+  viewportCenteredOn, animateViewportTo,
   zoomAt, pan as panViewport, clampViewport, drawModeMinScale, effectiveMinScale,
   MAX_SCALE,
 } from '../lib/viewport'
@@ -99,7 +99,6 @@ export default function WallCanvas() {
   }, [])
 
   const animCancel = useRef<(() => void) | null>(null)
-  const browseViewport = useRef<Viewport | null>(null)
   const initialCenterDone = useRef(false)
 
   // draw gesture state
@@ -317,7 +316,6 @@ export default function WallCanvas() {
     setLocationWorld(world)
     locationWorldRef.current = world
 
-    browseViewport.current = viewportRef.current
     const targetScale = getDevUnbounded()
       ? DRAW_SCALE
       : Math.max(DRAW_SCALE, drawModeMinScale(sizeRef.current.w, sizeRef.current.h))
@@ -344,18 +342,9 @@ export default function WallCanvas() {
     disarmPinch()
     pointers.current.clear()
     clearLockedLocation()
-    const target = browseViewport.current ?? initialViewport(sizeRef.current.w, sizeRef.current.h)
-    if (prefersReducedMotion()) {
-      setViewport(target)
-      setMode('browse')
-    } else {
-      setMode('animating')
-      animCancel.current = animateViewportTo(
-        viewportRef.current, target, TUNING.viewport.animDurationMs,
-        vp => setViewport(vp),
-        () => setMode('browse'),
-      )
-    }
+    // Stay where the user is — keep the current draw-mode viewport instead of
+    // animating back to the pre-draw browse position.
+    setMode('browse')
   }, [mode, disarmPinch])
 
   // ── pointer handlers ──────────────────────────────────────────────────────
