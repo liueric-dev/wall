@@ -12,7 +12,7 @@ export const TUNING = {
   },
 
   viewport: {
-    drawScale: 10,
+    drawScale: 15,
     minScale: 0.012,
     maxScale: 40,
     animDurationMs: 500,

@@ -7,6 +7,21 @@ export type { Viewport }
 export const MIN_SCALE = TUNING.viewport.minScale
 export const MAX_SCALE = TUNING.viewport.maxScale
 
+export function drawModeMinScale(screenW: number, screenH: number): number {
+  const radiusDiameter = TUNING.radius.pixels * 2
+  const margin = 1.1
+  return Math.min(screenW, screenH) / (radiusDiameter * margin)
+}
+
+export function effectiveMinScale(
+  mode: 'browse' | 'draw' | 'animating',
+  screenW: number,
+  screenH: number,
+): number {
+  if (mode === 'draw') return drawModeMinScale(screenW, screenH)
+  return Math.min(screenW / WORLD_WIDTH, screenH / WORLD_HEIGHT) * 0.75
+}
+
 export function initialViewport(screenW: number, screenH: number): Viewport {
   const scale = Math.min(screenW / WORLD_WIDTH, screenH / WORLD_HEIGHT) * 0.9
   const originX = (screenW - WORLD_WIDTH * scale) / 2
@@ -54,17 +69,40 @@ export function viewportCenteredOn(
  * Clamp a viewport so the city can never be panned off-screen.
  * Min scale is dynamic: city always fills at least 75% of the smaller screen dim.
  */
-export function clampViewport(vp: Viewport, screenW: number, screenH: number): Viewport {
-  const minScale = Math.min(screenW / WORLD_WIDTH, screenH / WORLD_HEIGHT) * 0.75
+export function clampViewport(
+  vp: Viewport,
+  screenW: number,
+  screenH: number,
+  mode: 'browse' | 'draw' | 'animating' = 'browse',
+  locationWorld: { x: number; y: number } | null = null,
+): Viewport {
+  const minScale = effectiveMinScale(mode, screenW, screenH)
   const scale = Math.max(minScale, Math.min(MAX_SCALE, vp.scale))
   const worldW = WORLD_WIDTH * scale
   const worldH = WORLD_HEIGHT * scale
   const pad = 100 // minimum px of world that must remain visible on each edge
-  return {
-    scale,
-    originX: Math.max(pad - worldW, Math.min(screenW - pad, vp.originX)),
-    originY: Math.max(pad - worldH, Math.min(screenH - pad, vp.originY)),
+  let originX = Math.max(pad - worldW, Math.min(screenW - pad, vp.originX))
+  let originY = Math.max(pad - worldH, Math.min(screenH - pad, vp.originY))
+
+  // In draw mode, additionally clamp viewport center to within DRAW_RADIUS of locationWorld
+  if (mode === 'draw' && locationWorld) {
+    const cx = (screenW / 2 - originX) / scale
+    const cyTop = (screenH / 2 - originY) / scale
+    const cy = WORLD_HEIGHT - cyTop
+    const dx = cx - locationWorld.x
+    const dy = cy - locationWorld.y
+    const dist = Math.hypot(dx, dy)
+    const radius = TUNING.radius.pixels
+    if (dist > radius) {
+      const angle = Math.atan2(dy, dx)
+      const clampedCx = locationWorld.x + Math.cos(angle) * radius
+      const clampedCy = locationWorld.y + Math.sin(angle) * radius
+      originX = screenW / 2 - clampedCx * scale
+      originY = screenH / 2 - (WORLD_HEIGHT - clampedCy) * scale
+    }
   }
+
+  return { scale, originX, originY }
 }
 
 /** Smoothly animate from one viewport to another. Returns a cancel function. */

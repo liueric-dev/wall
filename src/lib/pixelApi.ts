@@ -85,19 +85,6 @@ export async function fetchNewEvents(
   return (data as DbRow[]).map(dbRowToEntry)
 }
 
-export async function deletePixelEvents(
-  x: number,
-  y: number,
-): Promise<{ error: string | null }> {
-  const { error } = await supabase
-    .from('pixel_events')
-    .delete()
-    .eq('x', x)
-    .eq('y', y)
-
-  return { error: error ? error.message : null }
-}
-
 export async function upsertTile(
   tileX: number,
   tileY: number,

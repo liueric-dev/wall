@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { screenToWorld, TILE_SIZE, latLngToWorld } from '../lib/coordinates'
 import {
   initialViewport, viewportCenteredOn, animateViewportTo,
-  zoomAt, pan as panViewport, clampViewport,
+  zoomAt, pan as panViewport, clampViewport, drawModeMinScale, effectiveMinScale,
+  MAX_SCALE,
 } from '../lib/viewport'
 import type { Viewport } from '../lib/viewport'
 import { DRAW_RADIUS } from '../lib/location'
@@ -19,7 +20,7 @@ import { TUNING } from '../config/tuning'
 import { pickRandomNeighborhood } from '../config/neighborhoods'
 import { getRecentSavedPosition, savePosition } from '../lib/savedPosition'
 import {
-  insertPixelEvent, loadViewportPixels, deletePixelEvents, upsertTile,
+  insertPixelEvent, loadViewportPixels, upsertTile,
 } from '../lib/pixelApi'
 import type { Bounds } from '../lib/pixelApi'
 import { startPolling } from '../lib/polling'
@@ -136,6 +137,7 @@ export default function WallCanvas() {
   } | null>(null)
   const drawActive = useRef(false)
   const drawStartScreen = useRef<{ x: number; y: number } | null>(null)
+  const drawStartedAt = useRef(0)
   const hasDragged = useRef(false)
   const drawGroupId = useRef<string | null>(null)
   const drawGroupSeq = useRef(0)
@@ -328,9 +330,13 @@ export default function WallCanvas() {
     locationWorldRef.current = world
 
     browseViewport.current = viewportRef.current
+    const targetScale = Math.max(
+      DRAW_SCALE,
+      drawModeMinScale(sizeRef.current.w, sizeRef.current.h),
+    )
     const target = viewportCenteredOn(
       world.x, world.y,
-      DRAW_SCALE,
+      targetScale,
       sizeRef.current.w, sizeRef.current.h,
     )
     if (prefersReducedMotion()) {
@@ -378,6 +384,7 @@ export default function WallCanvas() {
     if (mode === 'draw' && pointers.current.size === 1) {
       drawActive.current = true
       drawStartScreen.current = { x: e.clientX, y: e.clientY }
+      drawStartedAt.current = Date.now()
       hasDragged.current = false
       drawGroupId.current = generateId()
       drawGroupSeq.current = 0
@@ -413,21 +420,42 @@ export default function WallCanvas() {
       const dx = midX - anchor.midX
       const dy = midY - anchor.midY
 
+      const w = sizeRef.current.w, h = sizeRef.current.h
+
+      // Pre-compute the final scale clampViewport would produce so origin and scale
+      // stay consistent through zoomAt. Without this, zoomAt computes origin assuming
+      // a scale that clampViewport then boosts to the draw-mode cap, breaking the
+      // zoom-anchor invariant and causing the radius-clamp to "snap" the view.
+      const minScaleEff = effectiveMinScale(mode, w, h)
+      const desiredScale = anchor.viewport.scale * factor
+      const finalScale = Math.max(minScaleEff, Math.min(MAX_SCALE, desiredScale))
+      const effectiveFactor = finalScale / anchor.viewport.scale
+
+      // At the draw-mode zoom-out cap, suppress pan — pinch only zooms.
+      const atDrawCap = mode === 'draw' && Math.abs(finalScale - drawModeMinScale(w, h)) < 1e-4
+      const effDx = atDrawCap ? 0 : dx
+      const effDy = atDrawCap ? 0 : dy
+
       setViewport(() => {
-        const panned = panViewport(anchor.viewport, dx, dy)
-        const zoomed = zoomAt(panned, midX, midY, factor)
-        return clampViewport(zoomed, sizeRef.current.w, sizeRef.current.h)
+        const panned = panViewport(anchor.viewport, effDx, effDy)
+        const zoomed = zoomAt(panned, midX, midY, effectiveFactor)
+        return clampViewport(zoomed, w, h, mode, locationWorldRef.current)
       })
       return
     }
 
     if (mode === 'browse') {
       // Single finger pan in browse mode
-      setViewport(vp => clampViewport(panViewport(vp, e.clientX - prev.x, e.clientY - prev.y), sizeRef.current.w, sizeRef.current.h))
+      setViewport(vp => clampViewport(panViewport(vp, e.clientX - prev.x, e.clientY - prev.y), sizeRef.current.w, sizeRef.current.h, mode, locationWorldRef.current))
       return
     }
 
     if (mode === 'draw' && drawActive.current) {
+      // 50ms gate: don't place drag pixels until we've waited for a possible 2nd finger.
+      // If a 2nd finger arrives in this window, armPinch clears drawActive and this branch
+      // never runs. Tap-place in onPointerUp is unaffected.
+      if (Date.now() - drawStartedAt.current < 50) return
+
       const start = drawStartScreen.current!
       const movedEnough = Math.hypot(e.clientX - start.x, e.clientY - start.y) > DRAG_THRESHOLD
 
@@ -479,17 +507,8 @@ export default function WallCanvas() {
           const start = drawStartScreen.current!
           const { x: wx, y: wy } = toWorldPixel(start.x, start.y, viewportRef.current)
 
-          if (getPixel(wx, wy) !== undefined) {
-            // Tap on a user-placed pixel — erase it back to background
-            deletePixel(wx, wy)
-            setPixelVersion(v => v + 1)
-            lastTapMs.current = Date.now()
-            deletePixelEvents(wx, wy)  // async, fire and forget
-          } else {
-            // Tap on empty/background — place pixel
-            const placed = placePixel(wx, wy, null, null)
-            if (placed) lastTapMs.current = Date.now()
-          }
+          const placed = placePixel(wx, wy, null, null)
+          if (placed) lastTapMs.current = Date.now()
         }
       }
 
@@ -506,7 +525,19 @@ export default function WallCanvas() {
     // and some mobile cases). These can fire post-gesture and cause runaway zoom.
     // Touch pinch is handled via pointer events; ignore the synthetic wheel form.
     if (e.ctrlKey) return
-    setViewport(vp => clampViewport(zoomAt(vp, e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 1 / 1.1), sizeRef.current.w, sizeRef.current.h))
+    setViewport(vp => {
+      const w = sizeRef.current.w, h = sizeRef.current.h
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
+      const minScaleEff = effectiveMinScale(mode, w, h)
+      const desiredScale = vp.scale * factor
+      const finalScale = Math.max(minScaleEff, Math.min(MAX_SCALE, desiredScale))
+      if (Math.abs(finalScale - vp.scale) < 1e-4) return vp
+      const effectiveFactor = finalScale / vp.scale
+      return clampViewport(
+        zoomAt(vp, e.clientX, e.clientY, effectiveFactor),
+        w, h, mode, locationWorldRef.current,
+      )
+    })
   }, [mode])
 
   return (
@@ -565,8 +596,8 @@ export default function WallCanvas() {
           </button>
           {toastVisible && (
             <div style={{
-              position: 'fixed',
-              top: 24,
+              position: 'absolute',
+              bottom: 'calc(100% + 14px)',
               left: '50%',
               transform: 'translateX(-50%)',
               padding: '8px 16px',
