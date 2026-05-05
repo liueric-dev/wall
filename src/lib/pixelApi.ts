@@ -53,36 +53,52 @@ export async function insertPixelEvent(
   return { eventId: (data as { id: number }).id, error: null }
 }
 
-export async function loadViewportPixels(bounds: Bounds): Promise<PixelEntry[]> {
-  const { data, error } = await supabase
-    .from('pixel_events')
-    .select('id, x, y, color, placed_at')
-    .gte('x', bounds.minX)
-    .lte('x', bounds.maxX)
-    .gte('y', bounds.minY)
-    .lte('y', bounds.maxY)
-    .order('placed_at', { ascending: true })
+// PostgREST caps responses at 1000 rows by default; paginate via Range until exhausted.
+const PAGE_SIZE = 1000
+const MAX_PAGES = 50  // safety: 50,000 events per call
 
-  if (error || !data) return []
-  return (data as DbRow[]).map(dbRowToEntry)
+export async function loadViewportPixels(bounds: Bounds): Promise<PixelEntry[]> {
+  const all: PixelEntry[] = []
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE
+    const { data, error } = await supabase
+      .from('pixel_events')
+      .select('id, x, y, color, placed_at')
+      .gte('x', bounds.minX)
+      .lte('x', bounds.maxX)
+      .gte('y', bounds.minY)
+      .lte('y', bounds.maxY)
+      .order('placed_at', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1)
+    if (error || !data) break
+    all.push(...(data as DbRow[]).map(dbRowToEntry))
+    if (data.length < PAGE_SIZE) break
+  }
+  return all
 }
 
 export async function fetchNewEvents(
   sinceIso: string,
   bounds: Bounds,
 ): Promise<PixelEntry[]> {
-  const { data, error } = await supabase
-    .from('pixel_events')
-    .select('id, x, y, color, placed_at')
-    .gte('x', bounds.minX)
-    .lte('x', bounds.maxX)
-    .gte('y', bounds.minY)
-    .lte('y', bounds.maxY)
-    .gt('placed_at', sinceIso)
-    .order('placed_at', { ascending: true })
-
-  if (error || !data) return []
-  return (data as DbRow[]).map(dbRowToEntry)
+  const all: PixelEntry[] = []
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * PAGE_SIZE
+    const { data, error } = await supabase
+      .from('pixel_events')
+      .select('id, x, y, color, placed_at')
+      .gte('x', bounds.minX)
+      .lte('x', bounds.maxX)
+      .gte('y', bounds.minY)
+      .lte('y', bounds.maxY)
+      .gt('placed_at', sinceIso)
+      .order('placed_at', { ascending: true })
+      .range(from, from + PAGE_SIZE - 1)
+    if (error || !data) break
+    all.push(...(data as DbRow[]).map(dbRowToEntry))
+    if (data.length < PAGE_SIZE) break
+  }
+  return all
 }
 
 export async function upsertTile(
