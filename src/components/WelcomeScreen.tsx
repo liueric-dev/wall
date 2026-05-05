@@ -3,13 +3,13 @@ import { captureLocationForSession } from '../lib/geolocation'
 import { latLngToWorld } from '../lib/coordinates'
 import { insertPixelEvent } from '../lib/pixelApi'
 import { getOrCreateSessionId, generateId } from '../lib/session'
-import { PALETTE } from '../data/testDoodles'
+import { PALETTE } from '../config/tuning'
 
 const CANVAS_SIZE = 120
 const PIXEL_SIZE = 10
 const GRID = CANVAS_SIZE / PIXEL_SIZE  // 12×12 grid on the mini canvas
 
-const WELCOME_COLORS = [0, 1, 2, 3, 4]  // charcoal, brick, mustard, navy, sage
+const WELCOME_COLORS = PALETTE.slice(0, 5)
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -21,7 +21,7 @@ function randomInt(min: number, max: number) {
 
 export default function WelcomeScreen({ onComplete }: { onComplete: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const [selectedColor, setSelectedColor] = useState(0)
+  const [selectedColor, setSelectedColor] = useState<string>(WELCOME_COLORS[0])
   const [placed, setPlaced] = useState(false)
 
   async function handleCanvasPointer(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -38,7 +38,7 @@ export default function WelcomeScreen({ onComplete }: { onComplete: () => void }
 
     // Render pixel on mini canvas
     const ctx = canvas.getContext('2d')!
-    ctx.fillStyle = PALETTE[selectedColor]
+    ctx.fillStyle = selectedColor
     ctx.fillRect(px * PIXEL_SIZE, py * PIXEL_SIZE, PIXEL_SIZE, PIXEL_SIZE)
 
     // GPS must be kicked off synchronously within the user gesture — any await before
@@ -59,7 +59,7 @@ export default function WelcomeScreen({ onComplete }: { onComplete: () => void }
         {
           id: generateId(),
           x: wx, y: wy,
-          color: PALETTE[selectedColor],
+          color: selectedColor,
           session_id: sessionId,
           group_id: null,
           group_seq: null,
@@ -143,19 +143,19 @@ export default function WelcomeScreen({ onComplete }: { onComplete: () => void }
         {/* Color picker */}
         {!placed && (
           <div style={{ display: 'flex', gap: 8 }}>
-            {WELCOME_COLORS.map(idx => (
+            {WELCOME_COLORS.map(hex => (
               <button
-                key={idx}
-                onClick={() => setSelectedColor(idx)}
+                key={hex}
+                onClick={() => setSelectedColor(hex)}
                 style={{
                   width: 28,
                   height: 28,
                   borderRadius: '50%',
-                  background: PALETTE[idx],
-                  border: selectedColor === idx ? '2px solid #1a1a1a' : '2px solid transparent',
+                  background: hex,
+                  border: selectedColor === hex ? '2px solid #1a1a1a' : '2px solid transparent',
                   cursor: 'pointer',
                   padding: 0,
-                  outline: selectedColor === idx ? '2px solid #faf7f2' : 'none',
+                  outline: selectedColor === hex ? '2px solid #faf7f2' : 'none',
                   outlineOffset: -4,
                 }}
               />

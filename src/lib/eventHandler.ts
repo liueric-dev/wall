@@ -7,7 +7,7 @@ const subscribers = new Set<() => void>()
 export function applyIncomingEvents(events: PixelEntry[]): void {
   if (events.length === 0) return
   for (const e of events) {
-    setPixel(e.x, e.y, e.colorIdx)
+    setPixel(e.x, e.y, e.color)
     if (lastSeenTimestamp === null || e.placed_at > lastSeenTimestamp) {
       lastSeenTimestamp = e.placed_at
     }

@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { latLngToWorld, worldToScreen } from '../lib/coordinates'
 import { NYC_BOROUGHS } from '../data/nycGeo'
 import { NYC_PARKS } from '../data/nycParks'
-import { OUTLINE_COLOR } from '../data/testDoodles'
+import { OUTLINE_COLOR } from '../config/tuning'
 import type { Viewport } from '../lib/viewport'
 
 // Pre-convert park rings from [lng, lat] to world coords

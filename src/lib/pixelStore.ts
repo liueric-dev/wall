@@ -1,16 +1,13 @@
-import { PALETTE } from '../data/testDoodles'
-import type { PixelEvent } from './events'
-
-// key = "x,y", value = palette index
-const _pixels = new Map<string, number>()
+// key = "x,y", value = hex color string (e.g. '#1a1a1a')
+const _pixels = new Map<string, string>()
 
 const key = (x: number, y: number) => `${x},${y}`
 
-export function getPixel(x: number, y: number): number | undefined {
+export function getPixel(x: number, y: number): string | undefined {
   return _pixels.get(key(x, y))
 }
 
-export function setPixel(x: number, y: number, color: number): void {
+export function setPixel(x: number, y: number, color: string): void {
   _pixels.set(key(x, y), color)
 }
 
@@ -18,15 +15,6 @@ export function deletePixel(x: number, y: number): void {
   _pixels.delete(key(x, y))
 }
 
-export function getAllUserPixels(): Map<string, number> {
+export function getAllUserPixels(): Map<string, string> {
   return _pixels
-}
-
-export function replayEvents(events: PixelEvent[]): void {
-  _pixels.clear()
-  for (const e of events) {
-    const idx = PALETTE.indexOf(e.color)
-    if (idx !== -1) setPixel(e.x, e.y, idx)
-    // last write wins — handles overwrites correctly
-  }
 }

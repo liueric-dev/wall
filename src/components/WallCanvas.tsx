@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { screenToWorld, TILE_SIZE, latLngToWorld } from '../lib/coordinates'
+import { screenToWorld, latLngToWorld } from '../lib/coordinates'
 import {
   initialViewport, viewportCenteredOn, animateViewportTo,
   zoomAt, pan as panViewport, clampViewport, drawModeMinScale, effectiveMinScale,
@@ -12,16 +12,12 @@ import { usePermissionState } from '../lib/usePermissionState'
 import type { PixelEvent } from '../lib/events'
 import { getOrCreateSessionId, generateId } from '../lib/session'
 import { getPixel, setPixel, deletePixel } from '../lib/pixelStore'
-import { getRawPixelColor } from '../lib/tileRenderer'
-import { PALETTE } from '../data/testDoodles'
 import { loadBudgetState, saveBudgetState, getCurrentBudget, deductBudget } from '../lib/budget'
 import { getCurrentPrompt } from '../lib/prompts'
-import { TUNING } from '../config/tuning'
+import { TUNING, PALETTE } from '../config/tuning'
 import { pickRandomNeighborhood } from '../config/neighborhoods'
 import { getRecentSavedPosition, savePosition } from '../lib/savedPosition'
-import {
-  insertPixelEvent, loadViewportPixels, upsertTile,
-} from '../lib/pixelApi'
+import { insertPixelEvent, loadViewportPixels } from '../lib/pixelApi'
 import type { Bounds } from '../lib/pixelApi'
 import { startPolling } from '../lib/polling'
 import { applyIncomingEvents, subscribeToEvents } from '../lib/eventHandler'
@@ -31,28 +27,7 @@ import RadiusOverlay from './RadiusOverlay'
 import DrawingToolbar from './DrawingToolbar'
 
 const DRAW_SCALE = TUNING.viewport.drawScale
-const DRAG_THRESHOLD = TUNING.cooldown.dragThresholdPx
-
-// ── Bresenham line ─────────────────────────────────────────────────────────
-function* linePixels(x0: number, y0: number, x1: number, y1: number): Generator<[number, number]> {
-  const dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0)
-  const sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1
-  let err = dx - dy, x = x0, y = y0
-  while (true) {
-    yield [x, y]
-    if (x === x1 && y === y1) break
-    const e2 = 2 * err
-    if (e2 > -dy) { err -= dy; x += sx }
-    if (e2 <  dx) { err += dx; y += sy }
-  }
-}
-
-// ── effective pixel color (user pixel wins over fake background) ───────────
-function getEffectiveColor(x: number, y: number): number | null {
-  const user = getPixel(x, y)
-  if (user !== undefined) return user
-  return getRawPixelColor(x, y)
-}
+const TAP_MAX_PX = TUNING.gesture.tapMaxMovementPx
 
 // ── screen → integer world pixel ─────────────────────────────────────────
 function toWorldPixel(sx: number, sy: number, vp: Viewport): { x: number; y: number } {
@@ -97,7 +72,7 @@ export default function WallCanvas() {
   sizeRef.current = size
 
   const [mode, setMode] = useState<'browse' | 'draw' | 'animating'>('browse')
-  const [selectedColor, setSelectedColor] = useState(0)
+  const [selectedColor, setSelectedColor] = useState<string>(PALETTE[0])
   const [pixelVersion, setPixelVersion] = useState(0)
   const [syncError, setSyncError] = useState(false)
   const [promptText, setPromptText] = useState('')
@@ -136,20 +111,16 @@ export default function WallCanvas() {
     midY: number
     viewport: Viewport
   } | null>(null)
-  const drawActive = useRef(false)
+  // Single-finger gesture state — applies to both modes.
+  // Movement-based tap/drag classification: < TAP_MAX_PX = tap, ≥ = drag.
   const drawStartScreen = useRef<{ x: number; y: number } | null>(null)
-  const drawStartedAt = useRef(0)
   const hasDragged = useRef(false)
   const spaceHeld = useRef(false)
   const panActive = useRef(false)
   const panPrevScreen = useRef<{ x: number; y: number } | null>(null)
-  const drawGroupId = useRef<string | null>(null)
-  const drawGroupSeq = useRef(0)
-  const lastDrawPixel = useRef<{ x: number; y: number } | null>(null)
 
   // cooldown refs
   const lastTapMs = useRef(0)
-  const lastDragPixelMs = useRef(0)
 
   // ── bootstrap: load pixels from Supabase on mount ────────────────────────
   useEffect(() => {
@@ -245,12 +216,8 @@ export default function WallCanvas() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [permissionState])
 
-  // ── place a single pixel ──────────────────────────────────────────────────
-  const placePixel = useCallback((
-    wx: number, wy: number,
-    groupId: string | null,
-    seq: number | null,
-  ): boolean => {
+  // ── place a single pixel (tap-only after sprint 12) ──────────────────────
+  const placePixel = useCallback((wx: number, wy: number): boolean => {
     const loc = locationWorldRef.current
     if (!loc) return false
     // bounds check
@@ -258,21 +225,20 @@ export default function WallCanvas() {
     // radius check
     const dx = wx - loc.x, dy = wy - loc.y
     if (Math.hypot(dx, dy) > DRAW_RADIUS) return false
-    // no-op check
-    if (getEffectiveColor(wx, wy) === selectedColor) return false
+    // no-op: tapping a pixel that's already this color does nothing
+    if (getPixel(wx, wy) === selectedColor) return false
     // budget check
     const budgetState = loadBudgetState()
     if (getCurrentBudget(budgetState) < 1) return false
 
-    const color = PALETTE[selectedColor]
     const sessionId = getOrCreateSessionId()
     const event: PixelEvent = {
       id: generateId(),
       x: wx, y: wy,
-      color,
+      color: selectedColor,
       session_id: sessionId,
-      group_id: groupId,
-      group_seq: seq,
+      group_id: null,
+      group_seq: null,
       placed_at: new Date().toISOString(),
       input_mode: 't',
       depth: 0,
@@ -282,27 +248,19 @@ export default function WallCanvas() {
     }
 
     // Optimistic update
-    const prevColorIdx = getPixel(wx, wy)
+    const prevColor = getPixel(wx, wy)
     setPixel(wx, wy, selectedColor)
     saveBudgetState(deductBudget(budgetState, 1))
     setPixelVersion(v => v + 1)
 
-    // Async write to Supabase
-    insertPixelEvent(event, selectedColor).then(({ eventId, error }) => {
+    insertPixelEvent(event, selectedColor).then(({ error }) => {
       if (error) {
-        // Revert local state
-        if (prevColorIdx === undefined) deletePixel(wx, wy)
-        else setPixel(wx, wy, prevColorIdx)
+        if (prevColor === undefined) deletePixel(wx, wy)
+        else setPixel(wx, wy, prevColor)
         setPixelVersion(v => v + 1)
         setSyncError(true)
-      } else if (eventId !== null) {
+      } else {
         setSyncError(false)
-        // Update tile cache (fire and forget)
-        const tileX = Math.floor(wx / TILE_SIZE)
-        const tileY = Math.floor(wy / TILE_SIZE)
-        const localX = wx - tileX * TILE_SIZE
-        const localY = wy - tileY * TILE_SIZE
-        upsertTile(tileX, tileY, localX, localY, selectedColor, eventId)
       }
     })
 
@@ -323,8 +281,9 @@ export default function WallCanvas() {
       midY: (a.y + b.y) / 2,
       viewport: viewportRef.current,
     }
-    drawActive.current = false
-    hasDragged.current = false
+    // Pinch supersedes any pending tap; mark as dragged so pointer-up doesn't fire a tap.
+    hasDragged.current = true
+    drawStartScreen.current = null
   }, [])
 
   const disarmPinch = useCallback(() => {
@@ -406,26 +365,24 @@ export default function WallCanvas() {
 
     if (pointers.current.size === 2 && !pinchPair.current) {
       armPinch()
+      return
     }
 
-    // Desktop pan in draw mode: right-click (mouse) or spacebar held + left-click.
+    // Desktop pan trigger: right-click (mouse) or spacebar held + left-click.
     const isRightClick = e.button === 2 && e.pointerType === 'mouse'
-    if (mode === 'draw' && pointers.current.size === 1 && (isRightClick || spaceHeld.current)) {
+    if (pointers.current.size === 1 && (isRightClick || spaceHeld.current)) {
       panActive.current = true
       panPrevScreen.current = { x: e.clientX, y: e.clientY }
       return
     }
 
-    if (mode === 'draw' && pointers.current.size === 1) {
-      drawActive.current = true
+    // First finger of a single-pointer gesture in either mode.
+    // Classification (tap vs drag-pan) is decided in onPointerMove/Up by movement.
+    if (pointers.current.size === 1) {
       drawStartScreen.current = { x: e.clientX, y: e.clientY }
-      drawStartedAt.current = Date.now()
       hasDragged.current = false
-      drawGroupId.current = generateId()
-      drawGroupSeq.current = 0
-      lastDrawPixel.current = null
     }
-  }, [mode, armPinch])
+  }, [armPinch])
 
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     if (!pointers.current.has(e.pointerId)) return
@@ -456,17 +413,11 @@ export default function WallCanvas() {
       const dy = midY - anchor.midY
 
       const w = sizeRef.current.w, h = sizeRef.current.h
-
-      // Pre-compute the final scale clampViewport would produce so origin and scale
-      // stay consistent through zoomAt. Without this, zoomAt computes origin assuming
-      // a scale that clampViewport then boosts to the draw-mode cap, breaking the
-      // zoom-anchor invariant and causing the radius-clamp to "snap" the view.
       const minScaleEff = effectiveMinScale(mode, w, h)
       const desiredScale = anchor.viewport.scale * factor
       const finalScale = Math.max(minScaleEff, Math.min(MAX_SCALE, desiredScale))
       const effectiveFactor = finalScale / anchor.viewport.scale
 
-      // At the draw-mode zoom-out cap, suppress pan — pinch only zooms.
       const atDrawCap = mode === 'draw' && Math.abs(finalScale - drawModeMinScale(w, h)) < 1e-4
       const effDx = atDrawCap ? 0 : dx
       const effDy = atDrawCap ? 0 : dy
@@ -479,7 +430,7 @@ export default function WallCanvas() {
       return
     }
 
-    // Desktop pan in draw mode (right-click or spacebar+left-click).
+    // Desktop pan (right-click or spacebar+left-click).
     if (panActive.current) {
       const last = panPrevScreen.current!
       const dx = e.clientX - last.x
@@ -492,50 +443,27 @@ export default function WallCanvas() {
       return
     }
 
-    if (mode === 'browse') {
-      // Single finger pan in browse mode
-      setViewport(vp => clampViewport(panViewport(vp, e.clientX - prev.x, e.clientY - prev.y), sizeRef.current.w, sizeRef.current.h, mode, locationWorldRef.current))
-      return
-    }
-
-    if (mode === 'draw' && drawActive.current) {
-      // 50ms gate: don't place drag pixels until we've waited for a possible 2nd finger.
-      // If a 2nd finger arrives in this window, armPinch clears drawActive and this branch
-      // never runs. Tap-place in onPointerUp is unaffected.
-      if (Date.now() - drawStartedAt.current < 50) return
-
-      const start = drawStartScreen.current!
-      const movedEnough = Math.hypot(e.clientX - start.x, e.clientY - start.y) > DRAG_THRESHOLD
-
-      if (movedEnough) {
-        hasDragged.current = true
-        const vp = viewportRef.current
-        const curr = toWorldPixel(e.clientX, e.clientY, vp)
-
-        const dragIntervalMs = 1000 / TUNING.cooldown.dragMaxPixelsPerSecond
-        if (lastDrawPixel.current) {
-          const { x: x0, y: y0 } = lastDrawPixel.current
-          let placedAny = false
-          for (const [wx, wy] of linePixels(x0, y0, curr.x, curr.y)) {
-            if (Date.now() - lastDragPixelMs.current < dragIntervalMs) continue
-            const placed = placePixel(wx, wy, drawGroupId.current, ++drawGroupSeq.current)
-            if (placed) { placedAny = true; lastDragPixelMs.current = Date.now() }
-          }
-          if (!placedAny) drawGroupSeq.current--
-        } else {
-          if (Date.now() - lastDragPixelMs.current >= dragIntervalMs) {
-            const placed = placePixel(curr.x, curr.y, drawGroupId.current, ++drawGroupSeq.current)
-            if (placed) lastDragPixelMs.current = Date.now()
-          }
+    // Single-finger gesture: classify tap vs drag-pan by movement, then pan if dragging.
+    if (drawStartScreen.current) {
+      if (!hasDragged.current) {
+        const start = drawStartScreen.current
+        const movement = Math.hypot(e.clientX - start.x, e.clientY - start.y)
+        if (movement >= TAP_MAX_PX) {
+          hasDragged.current = true
         }
-        lastDrawPixel.current = curr
+      }
+
+      if (hasDragged.current) {
+        // Pan in both modes; clampViewport applies the radius-clamp in draw mode.
+        setViewport(vp => clampViewport(
+          panViewport(vp, e.clientX - prev.x, e.clientY - prev.y),
+          sizeRef.current.w, sizeRef.current.h, mode, locationWorldRef.current,
+        ))
       }
     }
-  }, [mode, placePixel, armPinch, disarmPinch])
+  }, [mode, armPinch, disarmPinch])
 
   const onPointerUp = useCallback((e: React.PointerEvent) => {
-    const wasDrawing = drawActive.current
-
     pointers.current.delete(e.pointerId)
     if (pinchPair.current) {
       const { idA, idB } = pinchPair.current
@@ -549,26 +477,18 @@ export default function WallCanvas() {
       panPrevScreen.current = null
     }
 
-    if (mode === 'draw' && wasDrawing) {
-      drawActive.current = false
-
-      if (!hasDragged.current) {
-        // tap cooldown
-        if (Date.now() - lastTapMs.current < TUNING.cooldown.betweenPixelsMs) {
-          // silently skip
-        } else {
-          const start = drawStartScreen.current!
-          const { x: wx, y: wy } = toWorldPixel(start.x, start.y, viewportRef.current)
-
-          const placed = placePixel(wx, wy, null, null)
-          if (placed) lastTapMs.current = Date.now()
-        }
+    // Tap-to-place in draw mode (only if movement stayed below TAP_MAX_PX).
+    if (mode === 'draw' && drawStartScreen.current && !hasDragged.current) {
+      if (Date.now() - lastTapMs.current >= TUNING.cooldown.betweenPixelsMs) {
+        const start = drawStartScreen.current
+        const { x: wx, y: wy } = toWorldPixel(start.x, start.y, viewportRef.current)
+        const placed = placePixel(wx, wy)
+        if (placed) lastTapMs.current = Date.now()
       }
-
-      drawGroupId.current = null
-      drawGroupSeq.current = 0
-      lastDrawPixel.current = null
     }
+
+    drawStartScreen.current = null
+    hasDragged.current = false
   }, [mode, placePixel, disarmPinch])
 
   const onWheel = useCallback((e: React.WheelEvent) => {

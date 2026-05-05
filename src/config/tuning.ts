@@ -1,14 +1,16 @@
 export const TUNING = {
   budget: {
-    cap: 300,
+    cap: 256,
     regenPerHour: 60,
-    initialBudget: 300,
+    initialBudget: 256,
   },
 
   cooldown: {
     betweenPixelsMs: 300,
-    dragMaxPixelsPerSecond: 30,
-    dragThresholdPx: 3,
+  },
+
+  gesture: {
+    tapMaxMovementPx: 10,
   },
 
   viewport: {
@@ -34,3 +36,20 @@ export const TUNING = {
     browseIntervalMs: 5000,
   },
 } as const
+
+// Drawable palette — source of truth. Reordering is safe; storage is hex.
+export const PALETTE: readonly string[] = [
+  '#1a1a1a', // black
+  '#f0ebe0', // off-white
+  '#e63946', // red
+  '#f4a261', // orange
+  '#f4c430', // yellow
+  '#5db075', // green
+  '#3d8eb9', // blue
+  '#f06292', // pink
+  '#9575cd', // purple
+  '#8b5a3c', // brown
+] as const
+
+// Reserved for base-map outlines. Must NOT appear in PALETTE.
+export const OUTLINE_COLOR = '#a89a8c'
