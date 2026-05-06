@@ -51,66 +51,89 @@ export async function insertPixelEvent(
   return { eventId: (data as { id: number }).id, error: null }
 }
 
-// PostgREST caps responses at 1000 rows by default. We paginate to get the full
-// set, but use a parallel fetch strategy for cold-load: do an exact-count probe,
-// then fan out all pages in parallel via Promise.all. Cuts cold-load from ~N
-// sequential round-trips to ~1 round-trip-equivalent of latency for any N.
+// Pagination strategy: parallel keyset (id-range chunks).
+//
+// Why not OFFSET: Postgres `OFFSET N` walks N rows on every query, scaling
+// linearly with offset. At ~150k rows the planner hits statement_timeout.
+//
+// Why not sequential keyset: with 175k+ matching rows, ~175 sequential
+// round-trips × ~80ms = ~14s cold-load.
+//
+// Approach: get max(id) in bounds (one fast probe — uses btree on id),
+// split [1, max_id] into N_CHUNKS parallel ranges, paginate keyset-style
+// inside each range. Each query is a bounded index range scan — fast and
+// constant per page regardless of total dataset size.
 const PAGE_SIZE = 1000
-const MAX_PAGES = 200  // safety: 200,000 events per call
+const N_CHUNKS = 8         // parallel id-range shards
+const MAX_PAGES_PER_CHUNK = 50  // safety: 50k rows per chunk → 400k total cap
 
-async function fetchPage(bounds: Bounds, sinceIso: string | null, from: number): Promise<{
-  rows: PixelEntry[]
-  totalCount: number | null
-  error: string | null
-}> {
+async function fetchMaxId(bounds: Bounds, sinceIso: string | null): Promise<number> {
   let q = supabase
     .from('pixel_events')
-    .select('id, x, y, color, placed_at', { count: 'exact' })
-    .gte('x', bounds.minX)
-    .lte('x', bounds.maxX)
-    .gte('y', bounds.minY)
-    .lte('y', bounds.maxY)
+    .select('id')
+    .gte('x', bounds.minX).lte('x', bounds.maxX)
+    .gte('y', bounds.minY).lte('y', bounds.maxY)
   if (sinceIso !== null) q = q.gt('placed_at', sinceIso)
-  const { data, error, count } = await q
-    .order('placed_at', { ascending: true })
-    .range(from, from + PAGE_SIZE - 1)
-  if (error || !data) return { rows: [], totalCount: null, error: error?.message ?? 'unknown' }
-  return {
-    rows: (data as DbRow[]).map(dbRowToEntry),
-    totalCount: count ?? null,
-    error: null,
-  }
+  const { data, error } = await q
+    .order('id', { ascending: false })
+    .limit(1)
+  if (error || !data || data.length === 0) return 0
+  return (data[0] as { id: number }).id
 }
 
-async function loadAllPagesParallel(bounds: Bounds, sinceIso: string | null): Promise<PixelEntry[]> {
-  // First request: get page 0 + the exact total count.
-  const first = await fetchPage(bounds, sinceIso, 0)
-  if (first.error) return []
-  const all: PixelEntry[][] = [first.rows]
-  const total = first.totalCount
-  if (total === null || total <= PAGE_SIZE) return first.rows
+async function fetchChunkKeyset(
+  bounds: Bounds,
+  sinceIso: string | null,
+  startIdInclusive: number,
+  endIdInclusive: number,
+): Promise<PixelEntry[]> {
+  const out: PixelEntry[] = []
+  let cursor = startIdInclusive - 1  // gt(cursor) → first row is at startIdInclusive
+  for (let page = 0; page < MAX_PAGES_PER_CHUNK; page++) {
+    let q = supabase
+      .from('pixel_events')
+      .select('id, x, y, color, placed_at')
+      .gte('x', bounds.minX).lte('x', bounds.maxX)
+      .gte('y', bounds.minY).lte('y', bounds.maxY)
+      .gt('id', cursor)
+      .lte('id', endIdInclusive)
+    if (sinceIso !== null) q = q.gt('placed_at', sinceIso)
+    const { data, error } = await q
+      .order('id', { ascending: true })
+      .limit(PAGE_SIZE)
+    if (error || !data || data.length === 0) break
+    const rows = (data as DbRow[]).map(dbRowToEntry)
+    out.push(...rows)
+    if (rows.length < PAGE_SIZE) break
+    cursor = (data[data.length - 1] as DbRow).id
+  }
+  return out
+}
 
-  // Fan out remaining pages in parallel.
-  const pageStarts: number[] = []
-  for (let from = PAGE_SIZE; from < total && from < MAX_PAGES * PAGE_SIZE; from += PAGE_SIZE) {
-    pageStarts.push(from)
+async function loadAll(bounds: Bounds, sinceIso: string | null): Promise<PixelEntry[]> {
+  const maxId = await fetchMaxId(bounds, sinceIso)
+  if (maxId === 0) return []
+
+  // Split [1, maxId] into N_CHUNKS contiguous id-ranges.
+  const chunkSize = Math.ceil(maxId / N_CHUNKS)
+  const chunks: Array<Promise<PixelEntry[]>> = []
+  for (let i = 0; i < N_CHUNKS; i++) {
+    const start = i * chunkSize + 1
+    const end = i === N_CHUNKS - 1 ? maxId : (i + 1) * chunkSize
+    if (start > end) continue
+    chunks.push(fetchChunkKeyset(bounds, sinceIso, start, end))
   }
-  const rest = await Promise.all(
-    pageStarts.map(from => fetchPage(bounds, sinceIso, from)),
-  )
-  for (const r of rest) {
-    if (!r.error) all.push(r.rows)
-  }
-  return all.flat()
+  const results = await Promise.all(chunks)
+  return results.flat()
 }
 
 export async function loadViewportPixels(bounds: Bounds): Promise<PixelEntry[]> {
-  return loadAllPagesParallel(bounds, null)
+  return loadAll(bounds, null)
 }
 
 export async function fetchNewEvents(
   sinceIso: string,
   bounds: Bounds,
 ): Promise<PixelEntry[]> {
-  return loadAllPagesParallel(bounds, sinceIso)
+  return loadAll(bounds, sinceIso)
 }
