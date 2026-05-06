@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react'
 import { worldToScreen, screenToWorld } from '../lib/coordinates'
-import { getAllUserPixels } from '../lib/pixelStore'
+import { getPixelsInBounds } from '../lib/pixelStore'
 import type { Viewport } from '../lib/viewport'
 
 interface Props {
@@ -42,8 +42,10 @@ export default function PixelLayer({ viewport, width, height, pixelVersion }: Pr
     const wyMax = Math.max(tl.y, br.y)
 
     // Group user-placed pixels by hex color to minimize fillStyle changes.
+    // Uses the tile-indexed iterator so we touch only pixels whose tiles
+    // intersect the viewport — O(visible) instead of O(total).
     const byColor = new Map<string, [number, number][]>()
-    for (const [key, color] of getAllUserPixels()) {
+    for (const [key, color] of getPixelsInBounds(wxMin, wxMax, wyMin, wyMax)) {
       const comma = key.indexOf(',')
       const wx = Number(key.slice(0, comma))
       const wy = Number(key.slice(comma + 1))
@@ -64,11 +66,18 @@ export default function PixelLayer({ viewport, width, height, pixelVersion }: Pr
   }, [viewport, width, height, pixelVersion])
 
   useEffect(() => {
-    if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
-    rafRef.current = null
-    renderFrame()
+    // Coalesce rapid prop updates (pan/zoom fires many setViewport per second)
+    // into one renderFrame per animation frame.
+    if (rafRef.current !== null) return
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = null
+      renderFrame()
+    })
     return () => {
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
     }
   }, [renderFrame])
 
