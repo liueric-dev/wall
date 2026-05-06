@@ -135,6 +135,12 @@ export function PlacementView({ library, onClose }: Props) {
   // Pre-render asset thumbnails.
   // (computed inline in the sidebar; small libraries don't need caching.)
 
+  // Convert window-relative clientX/Y to container-local coords for screenToWorld/zoomAt.
+  const getLocalCoords = (clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect()
+    return { x: clientX - (rect?.left ?? 0), y: clientY - (rect?.top ?? 0) }
+  }
+
   // Pointer state for pan + tap-vs-drag classification.
   const pointers = useRef(new Map<number, { x: number; y: number }>())
   const pinchPair = useRef<{ idA: number; idB: number } | null>(null)
@@ -145,7 +151,7 @@ export function PlacementView({ library, onClose }: Props) {
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     if ((e.target as HTMLElement).closest('button, select, input, [data-no-pan]')) return
-    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    pointers.current.set(e.pointerId, getLocalCoords(e.clientX, e.clientY))
     ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
 
     if (pointers.current.size === 2) {
@@ -166,7 +172,8 @@ export function PlacementView({ library, onClose }: Props) {
 
     // Single-pointer: capture potential tap, or start dragging the preview if tapped over it.
     if (pointers.current.size === 1) {
-      tapStartScreen.current = { x: e.clientX, y: e.clientY }
+      const local = getLocalCoords(e.clientX, e.clientY)
+      tapStartScreen.current = local
       hasDragged.current = false
 
       // If preview exists and tap is inside the preview rectangle, prepare to drag-move it.
@@ -180,10 +187,10 @@ export function PlacementView({ library, onClose }: Props) {
         const w = a.width * viewportRef.current.scale
         const h = a.height * viewportRef.current.scale
         if (
-          e.clientX >= tlScreen.sx && e.clientX <= tlScreen.sx + w &&
-          e.clientY >= tlScreen.sy && e.clientY <= tlScreen.sy + h
+          local.x >= tlScreen.sx && local.x <= tlScreen.sx + w &&
+          local.y >= tlScreen.sy && local.y <= tlScreen.sy + h
         ) {
-          previewDragOffset.current = { dx: e.clientX - tlScreen.sx, dy: e.clientY - tlScreen.sy }
+          previewDragOffset.current = { dx: local.x - tlScreen.sx, dy: local.y - tlScreen.sy }
         } else {
           previewDragOffset.current = null
         }
@@ -196,7 +203,8 @@ export function PlacementView({ library, onClose }: Props) {
   const onPointerMove = useCallback((e: React.PointerEvent) => {
     if (!pointers.current.has(e.pointerId)) return
     const prev = pointers.current.get(e.pointerId)!
-    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+    const local = getLocalCoords(e.clientX, e.clientY)
+    pointers.current.set(e.pointerId, local)
 
     // Pinch.
     if (pinchPair.current && pinchAnchor.current) {
@@ -227,7 +235,7 @@ export function PlacementView({ library, onClose }: Props) {
     if (tapStartScreen.current) {
       if (!hasDragged.current) {
         const start = tapStartScreen.current
-        const movement = Math.hypot(e.clientX - start.x, e.clientY - start.y)
+        const movement = Math.hypot(local.x - start.x, local.y - start.y)
         if (movement >= TAP_MAX_PX) hasDragged.current = true
       }
 
@@ -236,8 +244,8 @@ export function PlacementView({ library, onClose }: Props) {
         const a = selectedRef.current
         if (a) {
           const newTopLeftScreen = {
-            sx: e.clientX - previewDragOffset.current.dx,
-            sy: e.clientY - previewDragOffset.current.dy,
+            sx: local.x - previewDragOffset.current.dx,
+            sy: local.y - previewDragOffset.current.dy,
           }
           const halfW = Math.floor(a.width / 2)
           const halfH = Math.floor(a.height / 2)
@@ -254,7 +262,7 @@ export function PlacementView({ library, onClose }: Props) {
       // Otherwise, pan the map.
       if (hasDragged.current) {
         setViewport(vp => clampViewport(
-          panViewport(vp, e.clientX - prev.x, e.clientY - prev.y),
+          panViewport(vp, local.x - prev.x, local.y - prev.y),
           sizeRef.current.w, sizeRef.current.h, 'browse', null,
         ))
       }
@@ -333,6 +341,7 @@ export function PlacementView({ library, onClose }: Props) {
 
   const onWheel = useCallback((e: React.WheelEvent) => {
     e.preventDefault()
+    const local = getLocalCoords(e.clientX, e.clientY)
     setViewport(vp => {
       const w = sizeRef.current.w, h = sizeRef.current.h
       const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1
@@ -341,7 +350,7 @@ export function PlacementView({ library, onClose }: Props) {
       const finalScale = Math.max(minScaleEff, Math.min(MAX_SCALE, desired))
       if (Math.abs(finalScale - vp.scale) < 1e-4) return vp
       const effFactor = finalScale / vp.scale
-      return clampViewport(zoomAt(vp, e.clientX, e.clientY, effFactor), w, h, 'browse', null)
+      return clampViewport(zoomAt(vp, local.x, local.y, effFactor), w, h, 'browse', null)
     })
   }, [])
 

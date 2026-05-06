@@ -1,7 +1,7 @@
 export const TUNING = {
   budget: {
     cap: 256,
-    regenPerHour: 60,
+    regenPerHour: 256,
     initialBudget: 256,
   },
 

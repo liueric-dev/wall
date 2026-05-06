@@ -1,15 +1,20 @@
 import { TILE_SIZE } from './coordinates'
 
-// Three parallel structures, all kept in sync by setPixel/deletePixel:
+// Four parallel structures, all kept in sync by setPixel/deletePixel:
 //
 // _pixels: flat key → color (queried by getPixel for hit-tests in placePixel).
 // _tileIndex: key set per tile (legacy iterator; kept for compat).
 // _tileCanvas: pre-rasterized 256×256 canvas per populated tile — the render
 //   hot path drawImages these directly to the visible canvas. Per-frame cost
 //   is O(visible tiles) regardless of pixel count.
+// _pixelEventId: highest event id ever applied to a coord. Lets parallel
+//   bootstrap chunks arrive in any order without older events stomping newer
+//   ones (multiple pixel_events rows can exist for the same (x,y); only the
+//   highest id should be visible).
 const _pixels = new Map<string, string>()
 const _tileIndex = new Map<string, Set<string>>()
 const _tileCanvas = new Map<string, HTMLCanvasElement>()
+const _pixelEventId = new Map<string, number>()
 
 const pixelKey = (x: number, y: number) => `${x},${y}`
 const tileKeyOf = (x: number, y: number) =>
@@ -42,8 +47,16 @@ export function getPixel(x: number, y: number): string | undefined {
   return _pixels.get(pixelKey(x, y))
 }
 
-export function setPixel(x: number, y: number, color: string): void {
+export function setPixel(x: number, y: number, color: string, eventId?: number): void {
   const k = pixelKey(x, y)
+  // Gate: an incoming event with a known id only wins if it's newer than
+  // whatever's currently painted at this coord. Optimistic local writes pass
+  // no eventId and are always applied (they fall through to last-write-wins).
+  if (eventId !== undefined) {
+    const prev = _pixelEventId.get(k)
+    if (prev !== undefined && prev >= eventId) return
+    _pixelEventId.set(k, eventId)
+  }
   const tk = tileKeyOf(x, y)
   if (!_pixels.has(k)) {
     let bucket = _tileIndex.get(tk)
@@ -65,6 +78,7 @@ export function setPixel(x: number, y: number, color: string): void {
 export function deletePixel(x: number, y: number): void {
   const k = pixelKey(x, y)
   if (!_pixels.delete(k)) return
+  _pixelEventId.delete(k)
   const tk = tileKeyOf(x, y)
   const bucket = _tileIndex.get(tk)
   if (bucket) {
@@ -80,6 +94,10 @@ export function deletePixel(x: number, y: number): void {
 
 export function getAllUserPixels(): Map<string, string> {
   return _pixels
+}
+
+export function getAllPixelEventIds(): Map<string, number> {
+  return _pixelEventId
 }
 
 /** Iterate visible populated tiles for the renderer. */

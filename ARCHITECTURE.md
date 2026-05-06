@@ -12,8 +12,9 @@ For philosophical commitments, see MANIFESTO.md.
 | Component | Status |
 |---|---|
 | Pixel events stored in Supabase Postgres | ✅ Implemented |
-| Tile cache (client-side rendering) | ✅ Implemented |
-| Polling at 5s intervals for real-time feel | ✅ Implemented |
+| In-memory tile-canvas cache (client-side, pre-rasterized) | ✅ Implemented |
+| Mode-aware polling (5s browse / 2s draw) | ✅ Implemented |
+| Parallel keyset pagination for bootstrap + polling | ✅ Implemented |
 | Anonymous sessions via localStorage UUID | ✅ Implemented |
 | Daily budget enforcement (client-side) | ✅ Implemented |
 | Daily prompt rotation | ✅ Implemented |
@@ -160,58 +161,101 @@ CREATE POLICY "Anyone can write tiles" ON tiles
 ### Tile Update Flow (Current)
 
 When a pixel event is committed:
-1. Insert into `pixel_events`
-2. Compute the affected tile coordinates from (x, y)
-3. Read the current tile from Supabase
-4. Update the relevant byte in the pixel array
-5. Upsert the tile back
+1. Insert into `pixel_events` (one round-trip).
+2. Locally call `setPixel(x, y, color)` (`src/lib/pixelStore.ts`), which updates the three in-memory maps and paints a 1×1 `fillRect` directly into the affected tile's offscreen `HTMLCanvasElement`.
 
-This runs **client-side, synchronously** at MVP scale. It causes two Supabase round-trips per pixel placement (event insert + tile upsert), which is acceptable for low traffic.
-
-**Planned migration:** A future sprint will move tile updates to a Supabase Edge Function triggered on `pixel_events` insert. This will eliminate the client-side round-trip and enable atomic tile generation under concurrent writes. Estimated when: write volume becomes a perceptible bottleneck.
+That is the entire write path. There is no client→Supabase tile read or upsert, and no Edge Function in the loop. The `tiles` table still exists in the schema (see below) but is **unused** at MVP — kept for forward-compat in case server-side tile materialisation is reintroduced. The previously planned Edge-Function migration is no longer the natural next step: per-pixel write cost is now one Supabase RTT, and the hot bottleneck has moved to bootstrap-fetch latency, addressed by parallel keyset pagination (see "Fetch Pipeline" below).
 
 ---
 
-## Real-Time Updates: Polling at 5 Seconds
+## Real-Time Updates: Mode-Aware Polling
 
-Decision finalized in Sprint 4: pixel updates are propagated via **polling**, not WebSocket subscriptions.
+Decision finalized in Sprint 4: pixel updates are propagated via **polling**, not WebSocket subscriptions. The cadence is now mode-aware rather than a flat 5s.
 
-### How It Works
-- Every 5 seconds, the client queries `pixel_events` for events newer than the last fetch timestamp, within the visible viewport bounds
-- New events are rendered onto the canvas without a full re-render
-- The `lastFetchTime` advances as new events arrive, ensuring no duplicates
+### How It Works (`src/lib/polling.ts`)
+- Each tick calls `fetchNewEvents(sinceIso, viewportBounds)`, which fetches `pixel_events` newer than `lastSeenTimestamp` and inside the current viewport. The fetch itself uses parallel keyset pagination — see "Fetch Pipeline" below.
+- Returned events are passed through `applyIncomingEvents`, which calls `setPixel` for each row and bumps the in-memory `lastSeenTimestamp`. `setPixel` paints into the relevant tile canvas immediately, then notifies subscribers, which causes `PixelLayer` to schedule one RAF render.
+- Cadence is selected per tick from `src/config/tuning.ts`:
+  - `polling.browseIntervalMs = 5000` (browse mode — passive viewing)
+  - `polling.drawIntervalMs = 2000` (draw mode — user is placing pixels, freshness matters more)
+- When `document.hidden` becomes true the loop pauses; on visibility-change it does an immediate catch-up fetch and then resumes the normal cadence.
 
 ### Why Polling Over WebSockets
-- Polling is dramatically simpler — no connection state, no reconnection logic
-- 5-second latency is acceptable for asynchronous use (most users draw at different times)
-- Synchronous use cases (two friends drawing together right now) are rare at MVP scale
-- Migration path to WebSockets is straightforward when needed
+- Polling is dramatically simpler — no connection state, no reconnection logic.
+- 2–5s latency is acceptable for asynchronous use (most users draw at different times).
+- Synchronous use cases (two friends drawing together right now) are rare at MVP scale.
+- Migration path to Supabase Realtime is straightforward when needed.
 
 ### Known Limitation
-For real-time *collaborative* drawing (two users in the same area at the same time), the 5-second delay is perceptible and slightly frustrating. This is a known limitation. If/when this becomes the dominant use case, the polling layer should be replaced with Supabase Realtime subscriptions.
+For real-time *collaborative* drawing (two users in the same area at the same time), even the 2s draw-mode delay is perceptible. This is a known limitation. If/when this becomes the dominant use case, the polling layer should be replaced with Supabase Realtime subscriptions.
 
 ---
 
 ## Rendering: Tile-Based Canvas
 
-The wall is too big to render all at once. We use a tile-based approach inspired by Google Maps.
+The wall is too big to render all at once. Tiles are 256×256 windows of world space and act as the unit of caching. Unlike Google Maps, **tiles are never fetched from the server** — they are pre-rasterized in-memory in the browser and updated incrementally as pixel events stream in.
 
 ### Tile Specification
-- **Tile size:** 256×256 pixels
-- **Total tiles for NYC:** ~72 × ~51 = ~3,700 tiles
-- Each tile stores its pixel data as a packed byte array (one byte per pixel for color index)
+- **Tile size:** 256×256 world pixels (`TILE_SIZE` in `src/lib/coordinates.ts`).
+- **Total addressable tiles for NYC:** ~72 × ~51 ≈ ~3,700. In practice only the populated subset is materialised — the `_tileCanvas` map only allocates a canvas the first time a pixel lands in a given tile.
 
-### Rendering Pipeline (Client)
-1. Compute which tiles are visible in the current viewport
-2. Fetch any tiles not already in the in-memory cache (from Supabase or generate from events)
-3. Draw each tile's pixels onto a Canvas at the appropriate scale
-4. Overlay the simple NYC base map (rivers, parks, bridges) underneath
-5. Re-render on pan/zoom events using `requestAnimationFrame`
+### Storage (`src/lib/pixelStore.ts`)
 
-### Performance Targets (Verified in Sprint 4)
-- 60fps pan and zoom with 100K+ visible pixels
-- Tile fetches complete within 200ms over reasonable network
-- Initial load under 2 seconds
+Three parallel in-memory maps, all kept in sync by `setPixel`/`deletePixel`:
+
+| Map | Type | Purpose |
+|---|---|---|
+| `_pixels` | `Map<"x,y", color>` | Flat hit-test. Used by `placePixel` to short-circuit no-op writes (same color on same coord). |
+| `_tileIndex` | `Map<"tx,ty", Set<pixelKey>>` | Per-tile pixel set. Now only used by the dev/seed `PlacementView` preview path. Kept for compat. |
+| `_tileCanvas` | `Map<"tx,ty", HTMLCanvasElement>` | **The render hot path.** One offscreen 256×256 canvas per populated tile, painted in screen-Y orientation (`lyCanvas = TILE_SIZE - 1 - lyWorld`) so the renderer can `drawImage` without per-frame Y-flip. |
+
+### Write Path (`setPixel`)
+Updates all three maps together. Tile canvas is painted with a 1×1 `ctx.fillRect`. After the first pixel in a tile, no further allocations occur on the hot path.
+
+### Render Path (`src/components/PixelLayer.tsx`)
+A single `useEffect` triggers whenever `viewport`, `width`, `height`, or `pixelVersion` changes. It schedules **one** `requestAnimationFrame` (coalescing rapid changes — e.g. continuous pan, or a burst of incoming polled events). On the frame:
+
+1. Resize the backing canvas to the DPR-scaled bounds and `clearRect`.
+2. `screenToWorld` the four corners → world bounds.
+3. `getVisibleTileCanvases(wxMin, wxMax, wyMin, wyMax)` yields `{tx, ty, canvas}` for each populated tile that intersects the viewport.
+4. For each, `worldToScreen(tx*TILE, (ty+1)*TILE)` (the world NW corner of the tile, since world Y grows north) → `ctx.drawImage(tileCanvas, sx, sy, TILE_SIZE * scale, TILE_SIZE * scale)`.
+
+Per-frame cost is **O(visible tiles)** — typically 5–30 `drawImage` calls — and is independent of the total number of pixels in the store. This is the key win over the previous per-pixel `fillRect` render path.
+
+### Layer Composition (`src/components/WallCanvas.tsx`)
+Three sibling `<canvas>` layers, painted bottom-up:
+
+1. `<BaseMapLayer pass="fills">` — cream background + borough fills.
+2. `<PixelLayer>` — user pixels (the tile-canvas blits described above).
+3. `<BaseMapLayer pass="outlines">` — borough and park strokes, painted *over* pixel art so coastlines remain legible at any zoom.
+
+`BaseMapLayer` re-renders on the same triggers as `PixelLayer` (viewport / size). It is not tile-cached — it strokes/fills GeoJSON paths directly, with line weight scaled inversely with zoom to stay visible.
+
+### Performance Targets
+- 60fps pan and zoom with the live dataset (~175k pixels visible at full zoom-out).
+- Per-frame budget: ~5–30 `drawImage` calls regardless of pixel count.
+- Initial load: dominated by the bootstrap fetch (see "Fetch Pipeline" below), not by rendering.
+
+---
+
+## Fetch Pipeline: Parallel Keyset Pagination
+
+`src/lib/pixelApi.ts` is the single source for both bootstrap (`loadViewportPixels`) and polling (`fetchNewEvents`). Both delegate to one internal `loadAll(bounds, sinceIso)`.
+
+### Strategy
+1. **Probe.** `fetchMaxId(bounds, sinceIso)` runs a single query that returns the largest `id` matching the bounds (and optional `placed_at > sinceIso`). Uses the btree on `id` — fast even on large tables.
+2. **Split.** `[1, maxId]` is divided into `N_CHUNKS = 32` contiguous id-ranges.
+3. **Paginate in parallel.** For each range, `fetchChunkKeyset` keyset-paginates: `gt(id, cursor)` + `lte(id, endId)`, ordered by `id` asc, `PAGE_SIZE = 1000`, capped at `MAX_PAGES_PER_CHUNK = 50` (≈50k rows per chunk; 1.6M global cap).
+4. **Merge.** `Promise.all` the chunks; flatten.
+
+### Why This Shape
+- **Why not OFFSET.** Postgres `OFFSET N` walks N rows on every query. At ~150k matching rows the planner hits `statement_timeout`.
+- **Why not sequential keyset.** With 175k+ rows, ~175 sequential round-trips × ~80ms ≈ ~14s cold-load. Unacceptable.
+- **Why parallel keyset.** Each chunk is a bounded index range scan on `id` — constant time per page regardless of total dataset size. With `N_CHUNKS = 32` the worst case (all rows clustered in a single id-range) still splits the cluster, keeping any individual chunk's pagination depth under ~6 pages even at 175k rows.
+
+### Knobs
+- `PAGE_SIZE = 1000` — Supabase's PostgREST default cap is 1000; raising would require server config.
+- `N_CHUNKS = 32` — empirically sized for the current cluster pattern; raise if cold-load becomes the bottleneck again as the dataset grows.
 
 ---
 
@@ -380,7 +424,7 @@ These rejections are revisitable if circumstances change, but the bar for revisi
 
 These are unresolved and will be addressed when the relevant feature is built:
 
-1. **Tile invalidation efficiency.** Current synchronous client-side approach works at MVP scale. Will need batching or Edge Functions when write volume grows.
+1. **Per-tab memory growth.** The in-memory `_tileCanvas` map only grows — populated tiles are never evicted, even when far outside the viewport. At MVP scale this is fine; long sessions on a large dataset may eventually need an LRU bound or an off-viewport eviction sweep.
 2. **Real-time updates beyond polling.** WebSocket subscriptions for collaborative drawing if it becomes a dominant use case.
 3. **Rendering performance at extreme zoom-out.** When you can see all of NYC at once, that's potentially millions of pixels in view. May need a separate "overview" rendering path.
 4. **Anti-spoofing layers.** Currently trusting GPS. Will add IP, WiFi, and behavioral signals only when abuse becomes measurable.

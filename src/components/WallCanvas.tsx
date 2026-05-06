@@ -17,10 +17,12 @@ import { getCurrentPrompt } from '../lib/prompts'
 import { TUNING, PALETTE } from '../config/tuning'
 import { pickRandomNeighborhood } from '../config/neighborhoods'
 import { getRecentSavedPosition, savePosition } from '../lib/savedPosition'
-import { insertPixelEvent, loadViewportPixels } from '../lib/pixelApi'
+import { insertPixelEvent, streamViewportPixels } from '../lib/pixelApi'
 import type { Bounds } from '../lib/pixelApi'
 import { startPolling } from '../lib/polling'
-import { applyIncomingEvents, subscribeToEvents } from '../lib/eventHandler'
+import { applyIncomingEvents, getLastSeenTimestamp, setLastSeenTimestamp, subscribeToEvents } from '../lib/eventHandler'
+import { getAllUserPixels, getAllPixelEventIds } from '../lib/pixelStore'
+import { loadSnapshot, saveSnapshot } from '../lib/pixelCache'
 import BaseMapLayer from './BaseMapLayer'
 import PixelLayer from './PixelLayer'
 import RadiusOverlay from './RadiusOverlay'
@@ -75,6 +77,8 @@ export default function WallCanvas() {
   const [selectedColor, setSelectedColor] = useState<string>(PALETTE[0])
   const [pixelVersion, setPixelVersion] = useState(0)
   const [syncError, setSyncError] = useState(false)
+  const [bootstrapError, setBootstrapError] = useState(false)
+  const [bootstrapAttempt, setBootstrapAttempt] = useState(0)
   const [promptText, setPromptText] = useState('')
 
   useEffect(() => { getCurrentPrompt().then(setPromptText) }, [])
@@ -121,12 +125,66 @@ export default function WallCanvas() {
   // cooldown refs
   const lastTapMs = useRef(0)
 
-  // ── bootstrap: load pixels from Supabase on mount ────────────────────────
+  // ── bootstrap: warm-hydrate from IndexedDB, then stream from Supabase ────
+  // Cold-load can be slow on flaky networks; the cache makes refresh feel
+  // instant. The streaming fetch then refines/extends what's painted, with
+  // per-request timeout + retry inside `streamViewportPixels` so a single
+  // stalled chunk can no longer hang the whole bootstrap.
   useEffect(() => {
     localStorage.removeItem('wall_events')  // throw away legacy localStorage pixels
-    const bounds = getViewportBounds(viewportRef.current, sizeRef.current)
-    loadViewportPixels(bounds).then(applyIncomingEvents)
-  }, [])
+    let cancelled = false
+
+    const run = async () => {
+      setBootstrapError(false)
+
+      // Phase 1: warm-hydrate from cache (best-effort, non-blocking on fail).
+      // Hydration runs in 5k-pixel batches, yielding to RAF between each,
+      // so a 175k-pixel snapshot doesn't block paint for 1-3s on refresh.
+      // Each cached entry carries its eventId so the gate in setPixel can
+      // reject older streamed events that would otherwise stomp them.
+      if (bootstrapAttempt === 0) {
+        const cached = await loadSnapshot()
+        if (cancelled) return
+        if (cached && cached.pixels.length > 0) {
+          const HYDRATE_BATCH = 5000
+          const ts = cached.lastSeenTimestamp ?? ''
+          for (let i = 0; i < cached.pixels.length; i += HYDRATE_BATCH) {
+            if (cancelled) return
+            const slice = cached.pixels.slice(i, i + HYDRATE_BATCH)
+            applyIncomingEvents(
+              slice.map(([k, color, eventId]) => {
+                const [xs, ys] = k.split(',')
+                return { x: Number(xs), y: Number(ys), color, placed_at: ts, eventId }
+              }),
+            )
+            await new Promise(resolve => setTimeout(resolve, 0))
+          }
+          if (cached.lastSeenTimestamp) {
+            setLastSeenTimestamp(cached.lastSeenTimestamp)
+          }
+        }
+      }
+
+      // Phase 2: stream live data into the store as chunks arrive.
+      const bounds = getViewportBounds(viewportRef.current, sizeRef.current)
+      try {
+        await streamViewportPixels(bounds, chunk => {
+          if (cancelled) return
+          applyIncomingEvents(chunk)
+        })
+        if (cancelled) return
+        // Persist a fresh snapshot for next refresh.
+        await saveSnapshot(getAllUserPixels(), getAllPixelEventIds(), getLastSeenTimestamp())
+      } catch (err) {
+        if (cancelled) return
+        console.error('Bootstrap failed:', err)
+        setBootstrapError(true)
+      }
+    }
+
+    void run()
+    return () => { cancelled = true }
+  }, [bootstrapAttempt])
 
   // ── polling: mode-aware, paused when backgrounded ────────────────────────
   useEffect(() => {
@@ -602,6 +660,30 @@ export default function WallCanvas() {
           pointerEvents: 'none',
           opacity: 0.8,
         }} />
+      )}
+
+      {/* Bootstrap failure: offer a retry */}
+      {bootstrapError && (
+        <button
+          onClick={() => setBootstrapAttempt(n => n + 1)}
+          style={{
+            position: 'absolute',
+            top: 16,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            padding: '8px 14px',
+            borderRadius: 999,
+            border: '1px solid #c0392b',
+            background: '#fff',
+            color: '#c0392b',
+            fontSize: 13,
+            fontWeight: 500,
+            cursor: 'pointer',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+          }}
+        >
+          Couldn't load pixels — tap to retry
+        </button>
       )}
 
       {/* Draw mode toolbar */}
