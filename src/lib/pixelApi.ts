@@ -64,8 +64,11 @@ export async function insertPixelEvent(
 // inside each range. Each query is a bounded index range scan — fast and
 // constant per page regardless of total dataset size.
 const PAGE_SIZE = 1000
-const N_CHUNKS = 8         // parallel id-range shards
-const MAX_PAGES_PER_CHUNK = 50  // safety: 50k rows per chunk → 400k total cap
+// Higher N_CHUNKS makes the worst case (all rows clustered in one id-range)
+// faster, since the cluster still gets split. 32 keeps individual chunk
+// pagination depth < 6 even when the cluster contains 175k rows.
+const N_CHUNKS = 32
+const MAX_PAGES_PER_CHUNK = 50  // safety: 50k rows per chunk → 1.6M total cap
 
 async function fetchMaxId(bounds: Bounds, sinceIso: string | null): Promise<number> {
   let q = supabase

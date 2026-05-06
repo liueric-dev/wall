@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback } from 'react'
-import { worldToScreen, screenToWorld } from '../lib/coordinates'
-import { getPixelsInBounds } from '../lib/pixelStore'
+import { worldToScreen, screenToWorld, TILE_SIZE } from '../lib/coordinates'
+import { getVisibleTileCanvases } from '../lib/pixelStore'
 import type { Viewport } from '../lib/viewport'
 
 interface Props {
@@ -41,33 +41,17 @@ export default function PixelLayer({ viewport, width, height, pixelVersion }: Pr
     const wyMin = Math.min(tl.y, br.y)
     const wyMax = Math.max(tl.y, br.y)
 
-    // Group user-placed pixels by hex color to minimize fillStyle changes.
-    // Uses the tile-indexed iterator so we touch only pixels whose tiles
-    // intersect the viewport — O(visible) instead of O(total).
-    const byColor = new Map<string, [number, number][]>()
-    for (const [key, color] of getPixelsInBounds(wxMin, wxMax, wyMin, wyMax)) {
-      const comma = key.indexOf(',')
-      const wx = Number(key.slice(0, comma))
-      const wy = Number(key.slice(comma + 1))
-      if (wx < wxMin || wx > wxMax || wy < wyMin || wy > wyMax) continue
-      let bucket = byColor.get(color)
-      if (!bucket) { bucket = []; byColor.set(color, bucket) }
-      bucket.push([wx, wy])
-    }
-
-    for (const [color, pixels] of byColor) {
-      ctx.fillStyle = color
-      for (const [wx, wy] of pixels) {
-        // NW corner of this pixel is worldToScreen(wx, wy+1, vp)
-        const { sx: px, sy: py } = worldToScreen(wx, wy + 1, vp)
-        ctx.fillRect(px, py, vp.scale, vp.scale)
-      }
+    // Render: drawImage every populated tile that intersects the viewport.
+    // Per-frame cost is ~O(visible_tiles) — independent of total pixel count.
+    const tileScreenSize = TILE_SIZE * vp.scale
+    for (const { tx, ty, canvas: tileCanvas } of getVisibleTileCanvases(wxMin, wxMax, wyMin, wyMax)) {
+      // World NW corner of the tile is (tx*TILE, (ty+1)*TILE) (world Y grows north).
+      const { sx, sy } = worldToScreen(tx * TILE_SIZE, (ty + 1) * TILE_SIZE, vp)
+      ctx.drawImage(tileCanvas, sx, sy, tileScreenSize, tileScreenSize)
     }
   }, [viewport, width, height, pixelVersion])
 
   useEffect(() => {
-    // Coalesce rapid prop updates (pan/zoom fires many setViewport per second)
-    // into one renderFrame per animation frame.
     if (rafRef.current !== null) return
     rafRef.current = requestAnimationFrame(() => {
       rafRef.current = null
